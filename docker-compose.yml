@@ -1,0 +1,18 @@
+services:
+  tron1-sim:
+    image: tron1-rl-deploy:noetic
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tron1
+    network_mode: host
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - ROBOT_TYPE=SF_TRON1A_ARX5ARM
+    volumes:
+      - ./tron1_ws:/root/tron1_ws
+      - ./IsaacLab_RFM/data:/root/umi_data:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    stdin_open: true
+    tty: true

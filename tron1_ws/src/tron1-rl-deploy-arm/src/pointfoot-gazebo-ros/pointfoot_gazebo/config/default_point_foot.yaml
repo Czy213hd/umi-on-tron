@@ -1,0 +1,10 @@
+gazebo:
+  # Control/actuation delay (seconds). Set to 0.0 to reduce sim-to-sim gap vs IsaacLab training.
+  delay: 0.0
+  imus:
+    limx_imu:
+      frame_id: limx_imu
+      orientation_covariance_diagonal: [ 0.0012, 0.0012, 0.0012 ]
+      angular_velocity_covariance: [ 0.0004, 0.0004, 0.0004 ]
+      linear_acceleration_covariance: [ 0.01, 0.01, 0.01 ]
+  contacts: ["contact_L_Link", "contact_R_Link"]

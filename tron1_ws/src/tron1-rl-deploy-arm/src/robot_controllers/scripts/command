@@ -1,0 +1,7 @@
+python3 /src/tron1-rl-deploy-arm/src/robot_controllers/scripts/publish_eepose_target_world_from_pkl.py \
+  _pickle_path:=/home/phi5090ii/NYX/umi-on-tron-lab/IsaacLab_RFM/data/tossing.pkl \
+  _traj_idx:=0 \
+  _publish_rate:=50 \
+  _use_time_from_pickle:=true \
+  _replay_speed:=1.0 \
+  _loop:=true

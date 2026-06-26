@@ -1,0 +1,39 @@
+# ── ROS 编译产物 ─────────────────────────────────────────────
+tron1_ws/build/
+tron1_ws/devel/
+tron1_ws/install/
+tron1_ws/.catkin_workspace
+
+# ── IsaacLab 训练输出 ────────────────────────────────────────
+IsaacLab_RFM/logs/
+IsaacLab_RFM/outputs/
+IsaacLab_RFM/wandb/
+
+# ── IsaacLab 数据文件（pkl 轨迹体积大，建议单独管理）────────
+IsaacLab_RFM/data/*.pkl
+
+# ── IsaacSim 缓存 / 符号链接 ────────────────────────────────
+IsaacLab_RFM/_isaac_sim/
+
+# ── Python 缓存 ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+*.egg
+
+fpo/
+# ── IDE 配置（只忽略仓库根目录下的，不影响子模块的配置）────
+/.idea/
+/.vscode/
+
+# ── Claude Code 工作目录 ─────────────────────────────────────
+/.claude/
+
+# ── 系统 / 工具 ──────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+*~
