@@ -386,7 +386,7 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Reward terms for the MDP."""
+    """Reward terms for the MDP."""  # 马尔可夫决策过程的奖励条件
 
     # Safety
     safety_exp = RewTerm(
@@ -498,18 +498,7 @@ class RewardsCfg:
         weight=-1.0,
         params={"min_distance": 0.2, "body_names": ("ankle_L_Link", "ankle_R_Link")},
     )
-    feet_lateral_distance = RewTerm(
-        func=mdp.feet_lateral_distance_exp,
-        weight=0.5,
-        params={
-            "target_distance": 0.21,
-            "std": 0.04,
-            "asset_cfg": SceneEntityCfg(
-                "robot",
-                body_names=("ankle_L_Link", "ankle_R_Link"),
-            ),
-        },
-    )
+
     # base_height = RewTerm(
     #     func=mdp.base_height_rough_l2,
     #     weight=-2.0,

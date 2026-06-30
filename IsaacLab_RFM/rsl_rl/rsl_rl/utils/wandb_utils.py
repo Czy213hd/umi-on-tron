@@ -43,19 +43,37 @@ class WandbSummaryWriter(SummaryWriter):
 
         run_name = os.path.split(log_dir)[-1]
 
+        # When resuming into an existing W&B run, the run may already have a larger step
+        # than the checkpoint iteration. Keep an offset so all future logged steps remain
+        # monotonic while preserving the relative spacing of training iterations.
+        self._step_offset = None
+
         wandb.log({"log_dir": run_name})
 
     def store_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
-        wandb.config.update({"runner_cfg": runner_cfg})
-        wandb.config.update({"policy_cfg": policy_cfg})
-        wandb.config.update({"alg_cfg": alg_cfg})
-        wandb.config.update({"env_cfg": asdict(env_cfg)})
+        # Resuming the same W&B run can legitimately change some fields
+        # (e.g., load_checkpoint, max_iterations). Allow value changes to prevent resume crashes.
+        wandb.config.update({"runner_cfg": runner_cfg}, allow_val_change=True)
+        wandb.config.update({"policy_cfg": policy_cfg}, allow_val_change=True)
+        wandb.config.update({"alg_cfg": alg_cfg}, allow_val_change=True)
+        wandb.config.update({"env_cfg": asdict(env_cfg)}, allow_val_change=True)
 
     def _map_path(self, path):
         if path in self.name_map:
             return self.name_map[path]
         else:
             return path
+
+    def _map_step(self, global_step):
+        if global_step is None:
+            return None
+
+        step = int(global_step)
+        if self._step_offset is None:
+            current_wandb_step = int(getattr(wandb.run, "step", 0))
+            # First explicit step should be strictly greater than current run step.
+            self._step_offset = max(0, (current_wandb_step + 1) - step)
+        return step + self._step_offset
 
     def add_scalar(self, tag, scalar_value, global_step=None, walltime=None, new_style=False):
         super().add_scalar(
@@ -65,7 +83,7 @@ class WandbSummaryWriter(SummaryWriter):
             walltime=walltime,
             new_style=new_style,
         )
-        wandb.log({self._map_path(tag): scalar_value}, step=global_step)
+        wandb.log({self._map_path(tag): scalar_value}, step=self._map_step(global_step))
 
     def stop(self):
         wandb.finish()
