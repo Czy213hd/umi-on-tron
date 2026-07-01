@@ -548,6 +548,49 @@ def legs_min_separation(
     return penalty
 
 
+def feet_lateral_distance_exp(
+    env: ManagerBasedRLEnv,
+    min_distance: float = 0.21,
+    body_names: tuple[str, str] = ("ankle_L_Link", "ankle_R_Link"),
+    axis: str = "y",
+    std: float = 0.02,
+) -> torch.Tensor:
+    """双脚横向最小间距惩罚（指数型）。
+
+    当指定轴向间距小于 ``min_distance`` 时输出正值惩罚，
+    大于等于阈值时输出 0。常配合负权重使用。
+
+    参数:
+        env: 环境对象。
+        min_distance: 指定轴上的最小安全间距（米）。
+        body_names: 左右脚 body 名。
+        axis: 采用哪个世界轴计算间距，可选 ``x``/``y``/``z``。
+        std: 指数尺度，越小对阈值以内的间距越敏感。
+
+    返回:
+        shape=(num_envs,) 的非负惩罚。
+    """
+    asset: Articulation = env.scene["robot"]
+    axis_to_idx = {"x": 0, "y": 1, "z": 2}
+    if axis not in axis_to_idx:
+        raise ValueError(f"Unsupported axis '{axis}', expected one of {tuple(axis_to_idx)}")
+
+    cache_names = getattr(env, "_feet_lateral_body_names", None)
+    if cache_names != tuple(body_names) or not hasattr(env, "_feet_lateral_link_ids"):
+        env._feet_lateral_link_ids = asset.find_bodies(list(body_names))[0]  # type: ignore[attr-defined]
+        env._feet_lateral_body_names = tuple(body_names)  # type: ignore[attr-defined]
+
+    ids = env._feet_lateral_link_ids  # type: ignore[attr-defined]
+    coord = axis_to_idx[axis]
+    pos = asset.data.body_pos_w[:, ids, coord]  # (N, 2)
+    lateral_dist = torch.abs(pos[:, 0] - pos[:, 1])
+    violation = torch.clamp(min_distance - lateral_dist, min=0.0)
+
+    safe_std = max(float(std), 1.0e-6)
+    penalty = 1.0 - torch.exp(-violation / safe_std)
+    return penalty
+
+
 def pose_product_reward(
     env: ManagerBasedRLEnv,
     pos_sigma: float,

@@ -80,9 +80,15 @@ def main():
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
 
-    # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
+    # Resolve logs from project root so launching from scripts/rsl_rl also works.
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+    log_root_path = os.path.join(project_root, "logs", "rsl_rl", agent_cfg.experiment_name)
+    if not os.path.isdir(log_root_path):
+        raise FileNotFoundError(
+            f"Experiment directory not found: {log_root_path}. "
+            "Please confirm --task/--load_run and that training logs exist under IsaacLab_RFM/logs."
+        )
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
     log_dir = os.path.dirname(resume_path)

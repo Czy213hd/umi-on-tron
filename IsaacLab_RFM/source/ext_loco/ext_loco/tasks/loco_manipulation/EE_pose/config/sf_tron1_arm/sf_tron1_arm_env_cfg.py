@@ -104,7 +104,7 @@ class CommandsCfg:
             pitch=(-3.2, 3.2),
             yaw=(-3.2, 3.2),
         ),
-        se3_decrease_vel_range=(0.5, 1.4),
+        se3_decrease_vel_range=(0.3, 0.8), # 原先是(0.5,1.4)
         debug_vis=True,
     )
 
@@ -216,7 +216,7 @@ class ObservationsCfg:
             func=mdp.EE_current_pose_b,
             noise=Unoise(n_min=-0.05, n_max=0.05),
             params={"asset_cfg": SceneEntityCfg("robot", body_names="link6")},
-        )  # 9
+        )  # 
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -493,10 +493,19 @@ class RewardsCfg:
         weight=0.5,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"), "threshold": 5.0},
     )
-    legs_min_separation = RewTerm(
-        func=mdp.legs_min_separation,
-        weight=-1.0,
-        params={"min_distance": 0.2, "body_names": ("ankle_L_Link", "ankle_R_Link")},
+    # legs_min_separation = RewTerm(
+    #     func=mdp.legs_min_separation,
+    #     weight=-1.0,
+    #     params={"min_distance": 0.2, "body_names": ("ankle_L_Link", "ankle_R_Link")},
+    # )
+    feet_lateral_distance = RewTerm(
+        func=mdp.feet_lateral_distance_exp,
+        weight=-10.0,
+        params={
+            "min_distance": 0.21,
+            "body_names": ("ankle_L_Link", "ankle_R_Link"),
+            "axis": "y",
+        },
     )
 
     # base_height = RewTerm(

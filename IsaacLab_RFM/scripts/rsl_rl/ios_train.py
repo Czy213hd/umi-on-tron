@@ -106,9 +106,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
 
-    # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
+    # Resolve logs relative to IsaacLab_RFM root (independent of launch cwd).
+    project_root = os.path.dirname(os.path.dirname(_script_dir))
+    log_root_path = os.path.join(project_root, "logs", "rsl_rl", agent_cfg.experiment_name)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs: {time-stamp}_{run_name}
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -143,6 +143,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner.add_git_repo_to_log(__file__)
     # save resume path before creating a new log_dir
     if agent_cfg.resume:
+        if not os.path.isdir(log_root_path):
+            raise FileNotFoundError(
+                f"Resume log directory not found: {log_root_path}. "
+                "Run once without --resume or set --load_run to an existing run."
+            )
         # get path to previous checkpoint
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
