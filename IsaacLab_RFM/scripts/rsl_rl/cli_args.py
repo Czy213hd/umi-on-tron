@@ -13,18 +13,6 @@ if TYPE_CHECKING:
     from isaaclab_rl.rsl_rl.rl_cfg import RslRlOnPolicyRunnerCfg
 
 
-def _str2bool(value: str | bool) -> bool:
-    """Parse common string forms into booleans for argparse options."""
-    if isinstance(value, bool):
-        return value
-    value = value.strip().lower()
-    if value in {"true", "1", "yes", "y", "t"}:
-        return True
-    if value in {"false", "0", "no", "n", "f"}:
-        return False
-    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
-
-
 def add_rsl_rl_args(parser: argparse.ArgumentParser):
     """Add RSL-RL arguments to the parser.
 
@@ -39,14 +27,7 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     )
     arg_group.add_argument("--run_name", type=str, default=None, help="Run name suffix to the log directory.")
     # -- load arguments
-    arg_group.add_argument(
-        "--resume",
-        type=_str2bool,
-        nargs="?",
-        const=True,
-        default=None,
-        help="Whether to resume from a checkpoint. Example: --resume True/False.",
-    )
+    arg_group.add_argument("--resume", type=bool, default=None, help="Whether to resume from a checkpoint.")
     arg_group.add_argument("--load_run", type=str, default=None, help="Name of the run folder to resume from.")
     arg_group.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
     # -- logger arguments

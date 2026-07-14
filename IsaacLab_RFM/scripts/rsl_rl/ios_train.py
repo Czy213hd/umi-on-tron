@@ -47,7 +47,6 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import os
-import pickle
 import sys
 import torch
 from datetime import datetime
@@ -69,7 +68,7 @@ from isaaclab.envs import (
     multi_agent_to_single_agent,
 )
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.io import dump_yaml
+from isaaclab.utils.io import dump_pickle, dump_yaml
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 # from isaaclab_tasks.utils.wrappers.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
@@ -83,13 +82,6 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
-
-
-def dump_pickle(filename, data):
-    """Save config data for IsaacLab versions without utils.io.dump_pickle."""
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, "wb") as file:
-        pickle.dump(data, file)
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -106,9 +98,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
 
-    # Resolve logs relative to IsaacLab_RFM root (independent of launch cwd).
-    project_root = os.path.dirname(os.path.dirname(_script_dir))
-    log_root_path = os.path.join(project_root, "logs", "rsl_rl", agent_cfg.experiment_name)
+    # specify directory for logging experiments
+    # Keep full training runs on the external log drive by default.  Set
+    # WBC_LOG_ROOT to override this location for a different machine.
+    log_root_path = os.path.abspath(
+        os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs")
+    )
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs: {time-stamp}_{run_name}
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -143,11 +138,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner.add_git_repo_to_log(__file__)
     # save resume path before creating a new log_dir
     if agent_cfg.resume:
-        if not os.path.isdir(log_root_path):
-            raise FileNotFoundError(
-                f"Resume log directory not found: {log_root_path}. "
-                "Run once without --resume or set --load_run to an existing run."
-            )
         # get path to previous checkpoint
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")

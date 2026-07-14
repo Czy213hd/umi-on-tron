@@ -1,20 +1,7 @@
 from __future__ import annotations
 
-# 说明:
-# 1) 本文件定义了 EE_pose 任务的奖励/惩罚函数（reward terms）。
-# 2) 这些函数会在配置文件中的 RewardsCfg 里通过 RewTerm(func=...) 被调用并乘以对应权重。
-# 3) 本文件只负责“计算每一项 reward 的原始值”，最终总奖励由 RewardManager 做加权求和。
-# 4) 常见缩写:
-#    - EE: End-Effector，末端执行器。
-#    - SE3: 位姿空间（位置 + 朝向）。
-#    - std/sigma: 容忍尺度，越小越严格（同样误差下 reward 会更低）。
-#    - _loco_mani_scale: 机动/操作混合因子，0 偏操作，1 偏机动。
-# 5) 张量约定:
-#    - 第一维通常是并行环境数 num_envs。
-#    - 函数返回 shape 一般为 (num_envs,)，表示每个并行环境一个标量 reward。
-
 import torch
-from typing import TYPE_CHECKING, Any, Dict, Sequence
+from typing import TYPE_CHECKING, Any, Dict
 
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
@@ -30,15 +17,8 @@ from ext_loco.utils.math import generate_sigmoid_scale, relexed_barrier_func, co
 def tracking_EE_cb_penalty_l1(
     env: ManagerBasedRLEnv,
 ):
-    """直接返回 EE 累积跟踪误差（L1 风格惩罚项）。
-
-    参数:
-        env: IsaacLab 的强化学习环境对象，内部保存了当前 step 的各类状态和缓存。
-
-    返回:
-        env.EE_se3_cb_error: 由其他模块提前计算好的累计 SE3 误差。
-    """
-    # 这里不再重复计算，直接使用环境中缓存好的误差。
+    """Penalty cumulative tracking error of EE SE3 commands using L1 kernel."""
+    # compute the error
     return env.EE_se3_cb_error
 
 
@@ -48,28 +28,14 @@ def safety_reward_exp(
     base_height_target: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """计算“安全性”奖励（指数核）。
-
-    这项奖励融合了足端几何偏差、车轮速度、底盘速度、姿态、底盘高度、机械臂中位姿态、EE 线/角速度。
-    误差越小，exp(-error/std^2) 越接近 1；误差越大，越接近 0。
-
-    参数:
-        env: 环境对象。
-        std: 指数核尺度，越小越严格。
-        base_height_target: 底盘目标高度（世界系 z）。
-        asset_cfg: 从 scene 里取哪个机器人资产，默认 "robot"。
-
-    返回:
-        shape=(num_envs,) 的安全尺度，按 _loco_mani_scale 混合locomotion安全和manipulation安全。
-    """
-    # 从场景中取出机器人对象（可为 RigidObject 或 Articulation）。
+    """Reward safety of EE position commands using exponential kernel."""
+    # extract the used quantities (to enable type-hinting)
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
 
-    # 该函数依赖 env._foot_link_ids（通常在 observation 里初始化）。
-    # 若未准备好，直接抛错，避免静默用错数据。
+    # prepare variable
+    # cache foot link ids (set by observations.foot_position_b)
     if not hasattr(env, "_foot_link_ids"):
         raise AttributeError("Foot link ids not set on env. Ensure observations.foot_position_b is called first.")
-    # root_link 的四元数/位置扩展到 2 个脚，便于后续做逐脚坐标变换。
     base_quat = asset.data.root_link_quat_w.unsqueeze(1).expand(-1, 2, -1)
     base_position = asset.data.root_link_pos_w.unsqueeze(1).expand(-1, 2, -1)
 
@@ -77,43 +43,36 @@ def safety_reward_exp(
     # if asset.data.root_quat_w != base_quat:
     #     raise ValueError("Root state is not equal to base state")
 
-    # 读取脚在世界系的位置，再变换到底盘坐标系（base frame）。
+    """Compute the final error"""
+    # compute the nominal foot error
     foot_position = asset.data.body_pos_w[:, env._foot_link_ids, :]
     foot_position_b = math_utils.quat_rotate_inverse(base_quat, foot_position - base_position)
     # base_height = -foot_position_b[:, :, 2].mean(dim=-1) + env._foot_radius
-    # 底盘高度（世界坐标 z）。
     base_height = asset.data.root_link_pos_w[:, 2]
 
-    # 计算足端在 base frame 的平面误差（x,y）。
     foot_pos_error_b = foot_position_b[:, :, :2] - env._nominal_foot_position_b[:, :2]
-    # inner_eight_condition:
-    # 若脚位于名义位置“内侧”（y 方向跨过名义符号），则给予更强惩罚（后面 /0.1）。
+    # inner eight condition
     inner_eight_condition = ((env._nominal_foot_position_b[:, 1] > 0.0) * (foot_pos_error_b[:, :, 1] < 0.0)) | (
         (env._nominal_foot_position_b[:, 1] < 0.0) * (foot_pos_error_b[:, :, 1] > 0.0)
     )
 
-    # y 方向误差分段归一化：内侧更严格，外侧相对宽松。
     foot_pos_error_b[:, :, 1] = torch.where(
         inner_eight_condition, foot_pos_error_b[:, :, 1] / 0.1, foot_pos_error_b[:, :, 1] / 0.2
     )
-    # x 方向误差归一化。
     foot_pos_error_b[:, :, 0] = foot_pos_error_b[:, :, 0] / 0.2
 
-    # 对两只脚、xy 两方向做 L1 汇总并裁剪，防止极端值主导梯度。
     foot_pos_error_b = torch.sum(torch.sum(foot_pos_error_b.abs(), dim=-1), dim=-1)
     foot_pos_error_b = torch.clamp(foot_pos_error_b, max=8.0)
-    # 底盘姿态误差（通过 projected_gravity_b 近似 roll/pitch 偏移）。
+    # compute base error
     base_orient_error_roll = torch.abs(asset.data.projected_gravity_b[:, 1]) / 0.1
     base_orient_error_pitch = torch.abs(asset.data.projected_gravity_b[:, 0]) / 0.85
-    # 底盘高度误差归一化。
-    base_height_error = torch.abs((base_height - base_height_target)) / 0.2
+    base_height_error = torch.abs((base_height - base_height_target)) / 0.2  # not used
     # arm_middle_pos = torch.tensor([0.0, 1.57, -2.7, 0.0, 0.0, 0.0], device=asset.device)
-    # 机械臂中位姿态 = 每个关节上下限中点。
     arm_middle_pos = (
         asset.data.default_joint_limits[:, env._arm_joint_ids, 1]
         + asset.data.default_joint_limits[:, env._arm_joint_ids, 0]
     ) / 2.0
-    # 机械臂偏离中位的 L1 误差（再做缩放）。
+    # arm in middle position
     arm_middle_error = (
         torch.sum(
             torch.abs(
@@ -129,14 +88,13 @@ def safety_reward_exp(
         / 9.0
     )
 
-    # 速度相关误差（车轮速度、底盘线/角速度、EE 线/角速度）。
+    # body velocity penalty
     wheel_vel_error = (torch.sum(torch.abs(asset.data.joint_vel[:, env._wheels_joint_ids]), dim=1) / 3.0).clip(max=4)
     base_lin_vel_error = torch.norm(asset.data.root_link_lin_vel_b, p=2, dim=1) / 0.5
     base_ang_vel_error = torch.norm(asset.data.root_link_ang_vel_b, p=2, dim=1) / 1.2
     Ee_lin_vel_error = torch.norm(asset.data.body_lin_vel_w[:, env._ee_link_idx].squeeze(1), p=2, dim=1) / 0.6
     Ee_ang_vel_error = torch.norm(asset.data.body_ang_vel_w[:, env._ee_link_idx].squeeze(1), p=2, dim=1) / 3.14
 
-    # 操作向安全误差（manipulation safety）加权融合后归一化。
     normalized_mani_error = (
         foot_pos_error_b  # 2
         + wheel_vel_error  # 2
@@ -150,7 +108,6 @@ def safety_reward_exp(
         + Ee_ang_vel_error  # 1
     ) / 13.0
 
-    # 机动向安全误差（locomotion safety）更强调足端/底盘稳定性。
     normalized_loco_error = (
         foot_pos_error_b / 2.0  # 2
         + base_orient_error_pitch  # 0.5
@@ -171,17 +128,14 @@ def safety_reward_exp(
     # sigmoid_scale = generate_sigmoid_scale(
     #     mu=0.8, decay_length=0.8, x=env.command_manager.get_term("EE_pose").se3_distance_ref
     # )
-    # 误差 -> 安全分数，指数核映射到 (0,1]。
     mani_safety_scale = torch.exp(-normalized_mani_error / std**2)
 
     loco_safety_scale = torch.exp(-normalized_loco_error / std**2)
 
-    # 缓存到 env，供其他 reward 项复用（例如 EE 跟踪项会乘上这些安全尺度）。
     env._mani_safety_scale = mani_safety_scale + 0.4
 
     env._loco_safety_scale = loco_safety_scale + 0.4
 
-    # 按 _loco_mani_scale 混合manipulation安全和locomotion安全。
     return mani_safety_scale * (1 - env._loco_mani_scale) + loco_safety_scale * env._loco_mani_scale
 
 
@@ -192,18 +146,8 @@ def track_EE_reference_exp(
     init_value: float = 0.99,
     command_name: str = "EE_pose",
 ) -> torch.Tensor:
-    """跟踪 EE 参考距离（SE3）奖励。
-
-    参数:
-        env: 环境对象。
-        std: 指数核尺度，越小越严格。
-        relese_delta: 释放阈值，小误差区间内不惩罚（相当于 dead-zone）。
-        init_value: 旧版保留参数，目前函数主体未使用。
-        command_name: 命令项名称，默认 EE_pose。
-
-    返回:
-        shape=(num_envs,) 的奖励值。
-    """
+    """Reward tracking of EE SE3 reference using exponential kernel."""
+    # compute the error
 
     # sigmoid_scale = generate_sigmoid_scale(
     #     mu=0.8, decay_length=0.8, x=env.command_manager.get_term("EE_pose").se3_distance_ref
@@ -212,35 +156,23 @@ def track_EE_reference_exp(
     # init_value = torch.ones(env.num_envs, device=env.device) * init_value
     # scale = torch.pow(init_value, contact_time)
 
-    # 位置/姿态误差来自 command term 的 metrics。
     EE_position_error = env.command_manager.get_term(command_name).metrics["position_error"]
     EE_orientation_error = env.command_manager.get_term(command_name).metrics["orientation_error"]
-    # 当前参考 SE3 距离。
     se3_distance_ref = env.command_manager.get_term("EE_pose").se3_distance_ref
 
-    # 构造跟踪误差（位置误差权重更高，乘 2）。
     track_error = torch.abs(se3_distance_ref - EE_orientation_error - 2 * EE_position_error) - relese_delta
 
-    # 小于 dead-zone 的误差置 0。
     track_error = torch.clamp(track_error, min=0.0)
 
-    # 乘上 loco/mani 混合尺度与安全尺度。
     return torch.exp(-track_error / std**2) * env._loco_mani_scale * env._loco_safety_scale
 
 
 def undesired_contacts(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """统计并惩罚非期望接触次数。
-
-    参数:
-        env: 环境对象。
-        threshold: 接触力阈值，超过即视为违规接触。
-        sensor_cfg: 接触传感器配置（包含 sensor 名和 body_ids）。
-    """
-    # 读取接触传感器。
+    """Penalize undesired contacts as the number of violations that are above a threshold."""
+    # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    # 取历史窗口的接触力，便于做“是否曾超过阈值”的判定。
+    # check if contact force is above threshold
     net_contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids]
-    # 先对 force 向量做范数，再对时间窗口取 max，最后按 body 统计超阈值数量。
     is_contact_num = torch.sum(torch.max(torch.norm(net_contact_forces, dim=-1), dim=1)[0] > threshold, dim=-1)
     # if getattr(env, "_feet_ids", None) is None:
     #     env._feet_ids = contact_sensor.find_bodies("wheel_.*")[0]
@@ -249,7 +181,7 @@ def undesired_contacts(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: Sce
     #     > threshold,
     #     dim=-1,
     # )
-    # 每个环境返回“超阈值 body 个数”，通常会在配置里乘负权重。
+    # sum over contacts for each environment
     return is_contact_num  # + feet_is_contact
 
 
@@ -258,28 +190,19 @@ def weighted_joint_torques_l2(
     torque_weight: dict[str, float],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """按关节加权的扭矩惩罚（L2 平方）。
+    """Penalize joint torques applied on the articulation using L2 squared kernel.
 
-    参数:
-        env: 环境对象。
-        torque_weight: 字典，键是关节名/正则可解析名，值是该关节扭矩惩罚权重。
-        asset_cfg: 机器人资产配置，默认 "robot"。
-
-    返回:
-        每个环境一个标量，值越大表示扭矩消耗越大。
+    NOTE: Only the joints configured in :attr:`asset_cfg.joint_ids` will have their joint torques contribute to the term.
     """
-    # 取出关节系统数据。
+    # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
 
-    # 初始化与 applied_torque 同形状的容器，未配置权重的关节保持 0。
     weighted_torque = torch.zeros_like(asset.data.applied_torque)
 
-    # 逐关节写入 w * torque^2。
     for joint_name, w in torque_weight.items():
         joint_idx, _ = asset.find_joints(joint_name)
         weighted_torque[:, joint_idx] = torch.square(asset.data.applied_torque[:, joint_idx]) * w
 
-    # 在关节维度求和，得到每个环境的总惩罚。
     return torch.sum(weighted_torque, dim=1)
 
 
@@ -288,22 +211,15 @@ def weighted_joint_power_l1(
     power_weight: dict[str, float],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """按关节加权的功率惩罚（L1）。
+    """Penalize joint power applied on the articulation using L1 kernel.
 
-    功率近似为 torque * joint_vel，这里取绝对值后加权求和。
-
-    参数:
-        env: 环境对象。
-        power_weight: 字典，键是关节名，值是功率惩罚权重。
-        asset_cfg: 机器人资产配置。
+    NOTE: Only the joints configured in :attr:`asset_cfg.joint_ids` will have their joint torques contribute to the term.
     """
-    # 取关节状态。
+    # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
 
-    # 初始化容器，未参与惩罚的关节保持 0。
     weighted_power = torch.zeros_like(asset.data.applied_torque)
 
-    # 写入每个关节的 |torque * vel| * w。
     for joint_name, w in power_weight.items():
         joint_idx = asset.find_joints(joint_name)[0]
         weighted_power[:, joint_idx] = (
@@ -322,7 +238,6 @@ def weighted_joint_power_l1(
     #             ).mean()
     #         )
 
-    # 关节维度求和，得到每个环境的总功率惩罚。
     return torch.sum(weighted_power, dim=1)
 
 
@@ -332,32 +247,18 @@ def track_EE_position_exp(
     init_value: float = 0.99,
     command_name: str = "EE_pose",
 ) -> torch.Tensor:
-    """EE 位置跟踪奖励（指数核）。
-
-    参数:
-        env: 环境对象。
-        std: 指数核尺度。越小越严格，误差稍大 reward 就会明显下降。
-        init_value: 历史兼容参数，当前主公式未启用。
-        command_name: 命令项名称，默认 "EE_pose"。
-
-    返回:
-        shape=(num_envs,) 的位置跟踪奖励。
-    """
+    """Reward tracking of EE position commands using exponential kernel."""
     # compute the error
     # contact_time = env.command_manager.get_term(command_name).metrics["contact_time"]
     # init_value = torch.ones(env.num_envs, device=env.device) * init_value
     # scale = torch.pow(init_value, contact_time)
 
-    # 从命令管理器读取 EE 位置误差。
     EE_position_error = env.command_manager.get_term(command_name).metrics["position_error"]
 
-    # 常规指数奖励项。
     normal = torch.exp(-EE_position_error / std**2)
 
-    # 微调增强项：在小误差区域给更强激励（更“追求精确”）。
     micro_enhancement = torch.exp(-5 * EE_position_error / std**2)
 
-    # 只在操作阶段（1 - _loco_mani_scale）有效，并乘操作安全尺度。
     return (normal + micro_enhancement) * (1 - env._loco_mani_scale) * env._mani_safety_scale
 
 
@@ -367,17 +268,7 @@ def track_EE_orientation_exp(
     command_name: str = "EE_pose",
     init_value: float = 0.99,
 ) -> torch.Tensor:
-    """EE 朝向跟踪奖励（指数核）。
-
-    参数:
-        env: 环境对象。
-        std: 朝向误差的指数核尺度。
-        command_name: 命令项名称。
-        init_value: 历史兼容参数，当前主公式未启用。
-
-    返回:
-        shape=(num_envs,) 的朝向跟踪奖励。
-    """
+    """Reward tracking of EE orientation commands using exponential kernel."""
 
     # contact_time = env.command_manager.get_term(command_name).metrics["contact_time"]
     # init_value = torch.ones(env.num_envs, device=env.device) * init_value
@@ -389,74 +280,43 @@ def track_EE_orientation_exp(
     #     > threshold
     # ).any(dim=-1)
 
-    # 位置优先策略：位置误差越大，朝向奖励应适当衰减。
+    # position_tracking_priority
     EE_position_error = env.command_manager.get_term(command_name).metrics["position_error"]
 
     position_scale = torch.exp(-EE_position_error / 0.5)
 
-    # 读取朝向误差。
     EE_orientation_error = env.command_manager.get_term(command_name).metrics["orientation_error"]
 
-    # 常规朝向指数项。
     normal = torch.exp(-EE_orientation_error / std**2)
 
-    # 小误差强化项。
     micro_enhancement = torch.exp(-5 * EE_orientation_error / std**2)
 
-    # 位置优先 * 操作阶段门控 * 安全尺度。
-    return (normal + micro_enhancement) * position_scale * (1 - env._loco_mani_scale) * env._mani_safety_scale
+    return (normal + micro_enhancement) * position_scale * (1 - env._loco_mani_scale)  * env._mani_safety_scale
 
 
 def reach_EE_position(
     env: ManagerBasedRLEnv, std: float, duration: float = 3, command_name: str = "EE_pose", init_value: float = 0.99
 ) -> torch.Tensor:
-    """EE 位置到达奖励（按剩余时间窗口激活）。
-
-    参数:
-        env: 环境对象。
-        std: 倒数二次核尺度。
-        duration: 激活窗口时长，通常表示命令结束前多久开始强调“到位”。
-        command_name: 命令项名称。
-        init_value: 历史兼容参数，当前主公式未启用。
-
-    返回:
-        shape=(num_envs,) 的到达奖励。
-    """
+    """Reward tracking of EE position commands using exponential kernel."""
     # compute the error
     # sigmoid_scale = generate_sigmoid_scale(
     #     mu=0.8, decay_length=0.8, x=env.command_manager.get_term("EE_pose").se3_distance_ref
     # )
-    # 读取位置误差与命令剩余时间。
     EE_position_error = env.command_manager.get_term(command_name).metrics["position_error"]
     time_left = env.command_manager.get_term(command_name).time_left
     # contact_time = env.command_manager.get_term(command_name).metrics["contact_time"]
     # init_value = torch.ones(env.num_envs, device=env.device) * init_value
     # scale = torch.pow(init_value, contact_time)
-    # 时长掩码：仅在指定时间窗内生效。
     mask = command_duration_mask(time_left, duration)
-    # 倒数二次核（相比指数核，对中等误差更平滑）。
     normal = (1.0 / (1.0 + torch.square(EE_position_error / std**2))) * mask
-    # 更陡的精确度奖励。
     micro_enhancement = (1.0 / (1.0 + torch.square(4 * EE_position_error / std**2))) * mask
-    # 仅操作阶段有效，并乘安全尺度。
     return (normal + micro_enhancement) * env._mani_safety_scale * (1 - env._loco_mani_scale)
 
 
 def reach_EE_orient(
     env: ManagerBasedRLEnv, std: float, duration: float = 3, command_name: str = "EE_pose", init_value: float = 0.99
 ) -> torch.Tensor:
-    """EE 朝向到达奖励（按剩余时间窗口激活）。
-
-    参数:
-        env: 环境对象。
-        std: 倒数二次核尺度。
-        duration: 激活窗口时长。
-        command_name: 命令项名称。
-        init_value: 历史兼容参数，当前主公式未启用。
-
-    返回:
-        shape=(num_envs,) 的朝向到达奖励。
-    """
+    """Reward tracking of EE position commands using exponential kernel."""
     # compute the error
     # sigmoid_scale = generate_sigmoid_scale(
     #     mu=0.8, decay_length=0.8, x=env.command_manager.get_term("EE_pose").se3_distance_ref
@@ -464,131 +324,114 @@ def reach_EE_orient(
     # contact_time = env.command_manager.get_term(command_name).metrics["contact_time"]
     # init_value = torch.ones(env.num_envs, device=env.device) * init_value
     # scale = torch.pow(init_value, contact_time)
-    # 读取朝向误差与剩余时间。
     EE_orient_error = env.command_manager.get_term(command_name).metrics["orientation_error"]
     time_left = env.command_manager.get_term(command_name).time_left
-    # 时长掩码。
     mask = command_duration_mask(time_left, duration)
-    # 倒数二次核主项 + 精确度增强项。
     normal = (1.0 / (1.0 + torch.square(EE_orient_error / std**2))) * mask
     micro_enhancement = (1.0 / (1.0 + torch.square(4 * EE_orient_error / std**2))) * mask
-    # 操作阶段门控与安全尺度。
     return (normal + micro_enhancement) * env._mani_safety_scale * (1 - env._loco_mani_scale)
 
 
 def track_EE_pb(env: ManagerBasedRLEnv, command_name: str = "EE_pose") -> torch.Tensor:
-    """基于优化进展（progress-based）的 EE 跟踪奖励。
-
-    参数:
-        env: 环境对象。
-        command_name: 命令项名称。
-
-    返回:
-        shape=(num_envs,) 的进展奖励。
-    """
-    # 当前位置到优化目标的距离。
+    """Reward tracking of EE position commands using exponential kernel."""
+    # compute the error
     optim_pos_distance = env.command_manager.get_term(command_name).optim_pos_distance
     position_scale = torch.exp(-optim_pos_distance / 0.5)
-    # 当前朝向到优化目标的距离。
     optim_orient_distance = env.command_manager.get_term(command_name).optim_orient_distance
     orient_scale = torch.exp(-optim_orient_distance / 0.5)
-    # 与上一时刻相比的“进步量”。
     pos_improve = env.command_manager.get_term(command_name).pos_improvement
     orient_improve = env.command_manager.get_term(command_name).orient_improvement
-    # 位置进步权重设为 2，朝向进步权重设为 1，再乘 loco 安全尺度。
     return (2 * pos_improve * position_scale + orient_improve * orient_scale) * env._loco_safety_scale
 
 
-def body_ee_alignment(env: ManagerBasedRLEnv, joint_names: Sequence[str] = ("J1", "J4")) -> torch.Tensor:
-    """机械臂体轴对齐惩罚：约束关键关节接近默认位姿。
+def body_ee_alignment(env: ManagerBasedRLEnv, joint_names: list[str] = ("J1", "J4")) -> torch.Tensor:
+    """Penalty to keep yaw-dominant arm joints close to their default (align EE with body)."""
+    asset: Articulation = env.scene["robot"]
+    joint_ids = asset.find_joints(joint_names)[0]
+    diff = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
+    return torch.sum(diff.abs(), dim=1)
 
-    参数:
-        env: 环境对象。
-        joint_names: 需要约束的关节名列表。
 
-    返回:
-        shape=(num_envs,) 的 L1 偏差和。
+def base_bidirectional_target_alignment(
+    env: ManagerBasedRLEnv,
+    command_name: str = "EE_pose",
+    min_target_distance: float = 0.1,
+) -> torch.Tensor:
+    """Align the base longitudinal axis with the horizontal EE-target direction.
+
+    At command sampling, a target in the front half-plane is assigned +1 and
+    one in the rear half-plane -1. The fixed mode produces the penalty
+    ``1 - direction * cos(heading_error)``. Rear targets therefore favor
+    backward walking and penalize a later 180-degree turn.
     """
     asset: Articulation = env.scene["robot"]
-    # 找到目标关节 id。
-    joint_ids = asset.find_joints(joint_names)[0]
-    # 当前关节角 - 默认关节角。
-    diff = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
-    # 对目标关节做绝对值求和。
-    return torch.sum(diff.abs(), dim=1)
+    command = env.command_manager.get_term(command_name)
+
+    target_delta_xy = command.pose_command_w[:, :2] - asset.data.root_link_pos_w[:, :2]
+    target_distance = torch.linalg.vector_norm(target_delta_xy, dim=1)
+    target_direction = target_delta_xy / target_distance.clamp_min(1.0e-6).unsqueeze(1)
+
+    local_forward = torch.zeros(env.num_envs, 3, device=env.device)
+    local_forward[:, 0] = 1.0
+    base_forward_w = math_utils.quat_apply(asset.data.root_link_quat_w, local_forward)
+    base_forward_xy = base_forward_w[:, :2]
+    base_forward_xy = base_forward_xy / torch.linalg.vector_norm(
+        base_forward_xy, dim=1
+    ).clamp_min(1.0e-6).unsqueeze(1)
+
+    heading_cosine = torch.sum(base_forward_xy * target_direction, dim=1).clamp(-1.0, 1.0)
+    penalty = 1.0 - command.travel_direction * heading_cosine
+    valid_target = (target_distance >= min_target_distance).float()
+    return penalty * valid_target * env._loco_mani_scale
 
 
 def legs_min_separation(
     env: ManagerBasedRLEnv,
     min_distance: float = 0.3,
     body_names: tuple[str, str] = ("ankle_L_Link", "ankle_R_Link"),
+    axis: str = "y",
 ) -> torch.Tensor:
-    """双脚最小间距惩罚（平面距离）。
-
-    参数:
-        env: 环境对象。
-        min_distance: 允许的最小平面距离（米）。
-        body_names: 左右脚对应的 body 名。
-
-    返回:
-        shape=(num_envs,) 的正值惩罚：max(min_distance - dist, 0)。
-    """
+    """Penalty if the two legs (ankles/feet) get closer than a target distance along one base-frame axis."""
     asset: Articulation = env.scene["robot"]
-    # 缓存腿部 link id，减少重复字符串匹配开销。
+    # cache leg link ids
     if not hasattr(env, "_leg_link_ids"):
         env._leg_link_ids = asset.find_bodies(list(body_names))[0]  # type: ignore
     ids = env._leg_link_ids
-    # 世界系位置，shape: (N,2,3)。
-    pos = asset.data.body_pos_w[:, ids, :]  # (N,2,3)
-    # 只看平面 XY 距离。
-    diff_xy = pos[:, 0, :2] - pos[:, 1, :2]
-    dist = torch.linalg.norm(diff_xy, dim=1)
-    # 小于阈值才产生惩罚。
+    axis_id = {"x": 0, "y": 1}[axis]
+    foot_pos_w = asset.data.body_pos_w[:, ids, :]  # (N,2,3)
+    base_quat_w = asset.data.root_link_quat_w.unsqueeze(1).expand(-1, 2, -1)
+    base_pos_w = asset.data.root_link_pos_w.unsqueeze(1).expand(-1, 2, -1)
+    foot_pos_b = math_utils.quat_rotate_inverse(base_quat_w, foot_pos_w - base_pos_w)
+    dist = torch.abs(foot_pos_b[:, 0, axis_id] - foot_pos_b[:, 1, axis_id])
     penalty = torch.clamp(min_distance - dist, min=0.0)
     return penalty
 
 
-def feet_lateral_distance_exp(
+def foot_flat_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Penalize ankle/foot links whose local z-axis tilts away from the world vertical axis."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    foot_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+    local_z = torch.zeros(foot_quat_w.shape[0], foot_quat_w.shape[1], 3, device=asset.device)
+    local_z[..., 2] = 1.0
+
+    foot_z_w = math_utils.quat_apply(foot_quat_w.reshape(-1, 4), local_z.reshape(-1, 3)).reshape_as(local_z)
+    # Equivalent to penalizing roll/pitch of the foot link while allowing yaw.
+    return torch.sum(torch.square(foot_z_w[..., :2]), dim=1).sum(dim=1)
+
+
+def foot_slip_l2(
     env: ManagerBasedRLEnv,
-    min_distance: float = 0.21,
-    body_names: tuple[str, str] = ("ankle_L_Link", "ankle_R_Link"),
-    axis: str = "y",
-    std: float = 0.02,
+    threshold: float,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """双脚横向最小间距惩罚（指数型）。
-
-    当指定轴向间距小于 ``min_distance`` 时输出正值惩罚，
-    大于等于阈值时输出 0。常配合负权重使用。
-
-    参数:
-        env: 环境对象。
-        min_distance: 指定轴上的最小安全间距（米）。
-        body_names: 左右脚 body 名。
-        axis: 采用哪个世界轴计算间距，可选 ``x``/``y``/``z``。
-        std: 指数尺度，越小对阈值以内的间距越敏感。
-
-    返回:
-        shape=(num_envs,) 的非负惩罚。
-    """
-    asset: Articulation = env.scene["robot"]
-    axis_to_idx = {"x": 0, "y": 1, "z": 2}
-    if axis not in axis_to_idx:
-        raise ValueError(f"Unsupported axis '{axis}', expected one of {tuple(axis_to_idx)}")
-
-    cache_names = getattr(env, "_feet_lateral_body_names", None)
-    if cache_names != tuple(body_names) or not hasattr(env, "_feet_lateral_link_ids"):
-        env._feet_lateral_link_ids = asset.find_bodies(list(body_names))[0]  # type: ignore[attr-defined]
-        env._feet_lateral_body_names = tuple(body_names)  # type: ignore[attr-defined]
-
-    ids = env._feet_lateral_link_ids  # type: ignore[attr-defined]
-    coord = axis_to_idx[axis]
-    pos = asset.data.body_pos_w[:, ids, coord]  # (N, 2)
-    lateral_dist = torch.abs(pos[:, 0] - pos[:, 1])
-    violation = torch.clamp(min_distance - lateral_dist, min=0.0)
-
-    safe_std = max(float(std), 1.0e-6)
-    penalty = 1.0 - torch.exp(-violation / safe_std)
-    return penalty
+    """Penalize horizontal foot velocity while the foot is in contact."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    net_contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids]
+    is_contact = torch.max(torch.norm(net_contact_forces, dim=-1), dim=1)[0] > threshold
+    foot_vel_xy = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
+    return torch.sum(torch.square(torch.norm(foot_vel_xy, dim=-1)) * is_contact, dim=1)
 
 
 def pose_product_reward(
@@ -597,47 +440,26 @@ def pose_product_reward(
     orn_sigma: float,
     command_name: str = "EE_pose",
 ) -> torch.Tensor:
-    """UMI 风格位姿乘积奖励：位置项 * 朝向项。
-
-    参数:
-        env: 环境对象。
-        pos_sigma: 位置项尺度（越大越宽容）。
-        orn_sigma: 朝向项尺度（越大越宽容）。
-        command_name: 命令项名称。
-
-    返回:
-        shape=(num_envs,) 的位姿联合奖励。
-    """
+    """UMI-style EE pose reward: position and orientation terms multiplied."""
     term = env.command_manager.get_term(command_name)
-    # 读取位置与朝向误差。
     pos_err = term.metrics["position_error"]
     orn_err = term.metrics["orientation_error"]
-    # 分别计算两项奖励。
     pos_reward = torch.exp(-(pos_err ** 2) / pos_sigma)
     orn_reward = torch.exp(-orn_err / orn_sigma)
-    # 乘积形式会强调“位置和朝向都要好”。
     return pos_reward * orn_reward
 
 
 def joint_vel_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    """关节速度惩罚（L2 平方）。
+    """Penalize joint velocities on the articulation using L2 squared kernel.
 
-    参数:
-        env: 环境对象。
-        asset_cfg: 资产配置，可通过 joint_ids/joint_names 选择参与惩罚的关节。
-
-    返回:
-        shape=(num_envs,) 的关节速度平方和。
+    NOTE: Only the joints configured in :attr:`asset_cfg.joint_ids` will have their joint velocities contribute to the term.
     """
-    # 取机器人关节系统。
+    # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    # 对选择关节做 velocity^2 后求和。
     return torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
 
 
 def stay_alive(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """存活奖励：每步返回常数 1。"""
-    # 常用于给 agent 一个基础正激励，权重通常较小。
     return torch.ones(env.num_envs, device=env.device)
 
 
@@ -647,57 +469,37 @@ def base_height_rough_l2(
     sensor_cfg: SceneEntityCfg,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """底盘高度惩罚（适配 rough/射线地形）。
+    """Penalize asset height from its target using L2 squared kernel.
 
-    参数:
-        env: 环境对象。
-        target_height: 目标高度（米）。
-        sensor_cfg: RayCaster 传感器配置（用于估计地面高度）。
-        asset_cfg: 资产配置。
-
-    返回:
-        shape=(num_envs,) 的高度偏差平方。
+    Note:
+        Currently, it assumes a flat terrain, i.e. the target height is in the world frame.
     """
-    # 读取机器人与地面射线传感器。
+    # extract the used quantities (to enable type-hinting)
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
     sensor: RayCaster = env.scene.sensors[sensor_cfg.name]
-    # 机器人根部高度 - 射线命中高度 => 相对地面高度。
     height = asset.data.root_link_pos_w[:, 2].unsqueeze(1) - sensor.data.ray_hits_w[:, :, 2]
     # sensor.data.ray_hits_w can be inf, so we clip it to avoid NaN
     height = torch.nan_to_num(height, nan=target_height, posinf=target_height, neginf=target_height)
-    # 以多条射线平均高度与目标高度的偏差作为惩罚。
     return torch.square(height.mean(dim=1) - target_height)
 
 
 def flat_orientation_z_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    """底盘竖直朝向惩罚（L2）。
+    """Penalize non-flat base orientation using L2 squared kernel.
 
-    参数:
-        env: 环境对象。
-        asset_cfg: 资产配置。
-
-    返回:
-        shape=(num_envs,) 的姿态惩罚。
+    This is computed by penalizing the xy-components of the projected gravity vector.
     """
-    # 读取机器人状态。
+    # extract the used quantities (to enable type-hinting)
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
-    # projected_gravity_b[:, 2] 理想值约为 -1（重力朝 base -z）。
     return torch.square(asset.data.projected_gravity_b[:, 2] + 1)
 
 
 def dof_power_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    """关节机械功率惩罚（L2）。
+    """Penalize joint power applied on the articulation using L2-kernel.
 
-    参数:
-        env: 环境对象。
-        asset_cfg: 参与惩罚的关节配置。
-
-    返回:
-        shape=(num_envs,) 的 |torque*vel|^2 求和。
+    NOTE: Only the joints configured in :attr:`asset_cfg.joint_ids` will have their joint torques contribute to the L2 norm.
     """
-    # 读取关节系统。
+    # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    # 机械功率近似 torque*velocity，对其平方后求和。
     return torch.sum(
         torch.square(asset.data.applied_torque[:, asset_cfg.joint_ids] * asset.data.joint_vel[:, asset_cfg.joint_ids]),
         dim=1,
@@ -705,18 +507,12 @@ def dof_power_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntity
 
 
 def dof_power_l1(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    """关节机械功率惩罚（L1）。
+    """Penalize joint power applied on the articulation using L2-kernel.
 
-    参数:
-        env: 环境对象。
-        asset_cfg: 参与惩罚的关节配置。
-
-    返回:
-        shape=(num_envs,) 的 |torque*vel| 绝对值求和。
+    NOTE: Only the joints configured in :attr:`asset_cfg.joint_ids` will have their joint torques contribute to the L2 norm.
     """
-    # 读取关节系统。
+    # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    # 机械功率绝对值求和。
     return torch.sum(
         torch.abs(asset.data.applied_torque[:, asset_cfg.joint_ids] * asset.data.joint_vel[:, asset_cfg.joint_ids]),
         dim=1,
@@ -729,26 +525,12 @@ def feet_regulation_penalty(
     feet_radius: float,
     feet_height_target: float,
 ) -> torch.Tensor:
-    """足端调节惩罚：抑制低高度时的高速摆动。
-
-    参数:
-        env: 环境对象。
-        asset_cfg: 足端 body 配置。
-        feet_radius: 足端半径，用于由 link 高度近似接触高度。
-        feet_height_target: 高度尺度参数。
-
-    返回:
-        shape=(num_envs,) 的足端速度惩罚。
-    """
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
-    # 足端高度（简单近似并裁剪到 [0,1] 以稳定数值）。
     feet_height = torch.clip(
         asset.data.body_pos_w[:, asset_cfg.body_ids, 2] - feet_radius, 0, 1
     )  # TODO: change to the height relative to the vertical projection of the terrain
-    # 足端平面速度。
     feet_vel_xy = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
 
-    # 高度越低，exp(-h/scale) 越大，低空高速动作惩罚更强。
     reward = torch.sum(
         torch.exp(-feet_height / feet_height_target) * torch.square(torch.norm(feet_vel_xy, dim=-1)), dim=1
     )
@@ -758,27 +540,21 @@ def feet_regulation_penalty(
 def feet_air_time(
     env: ManagerBasedRLEnv, command_name: str, sensor_cfg: SceneEntityCfg, threshold: float
 ) -> torch.Tensor:
-    """足端腾空时长奖励。
+    """Reward long steps taken by the feet using L2-kernel.
 
-    参数:
-        env: 环境对象。
-        command_name: 速度命令名称（通常取其 xy 大小判断是否应走路）。
-        sensor_cfg: 接触传感器配置。
-        threshold: 期望最小腾空时长阈值。
+    This function rewards the agent for taking steps that are longer than a threshold. This helps ensure
+    that the robot lifts its feet off the ground and takes steps. The reward is computed as the sum of
+    the time for which the feet are in the air.
 
-    返回:
-        shape=(num_envs,) 的腾空奖励。
+    If the commands are small (i.e. the agent is not supposed to take a step), then the reward is zero.
     """
-    # 读取接触传感器。
+    # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    # 首次触地标志（用于在落地瞬间结算上一次腾空质量）。
+    # compute the reward
     first_contact = contact_sensor.compute_first_contact(env.step_dt)[:, sensor_cfg.body_ids]
-    # 上一次腾空时长。
     last_air_time = contact_sensor.data.last_air_time[:, sensor_cfg.body_ids]
-    # (腾空时长 - 阈值) * 首次接触，并在足端维求和。
     reward = torch.sum((last_air_time - threshold) * first_contact, dim=1)
     # no reward for zero command
-    # 若速度命令很小，不奖励迈步（避免静止时抖腿骗分）。
     reward *= torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > 0.1
     return reward
 
@@ -786,53 +562,39 @@ def feet_air_time(
 def feet_air_time_positive_biped(
     env: ManagerBasedRLEnv, command_name: str, threshold: float, sensor_cfg: SceneEntityCfg
 ) -> torch.Tensor:
-    """双足步态腾空奖励（鼓励单脚支撑）。
+    """Reward long steps taken by the feet for bipeds.
 
-    参数:
-        env: 环境对象。
-        command_name: 命令名称。
-        threshold: 奖励上限阈值。
-        sensor_cfg: 接触传感器配置。
+    This function rewards the agent for taking steps up to a specified threshold and also keep one foot at
+    a time in the air.
 
-    返回:
-        shape=(num_envs,) 的双足步态奖励。
+    If the commands are small (i.e. the agent is not supposed to take a step), then the reward is zero.
     """
-    # 读取接触传感器。
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    # 当前腾空/接触时长。
+    # compute the reward
     air_time = contact_sensor.data.current_air_time[:, sensor_cfg.body_ids]
     contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
-    # 是否接触地面。
     in_contact = contact_time > 0.0
-    # 在接触态取 contact_time，在腾空态取 air_time。
     in_mode_time = torch.where(in_contact, contact_time, air_time)
-    # 双足中恰好 1 足接触才算单脚支撑。
     single_stance = torch.sum(in_contact.int(), dim=1) == 1
-    # 单脚支撑时取较小的 mode_time 作为奖励基准。
     reward = torch.min(torch.where(single_stance.unsqueeze(-1), in_mode_time, 0.0), dim=1)[0]
-    # 上限截断。
     reward = torch.clamp(reward, max=threshold)
     # no reward for zero command
-    # 低命令速度下不奖励。
     reward *= torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > 0.1
     return reward
 
 
 def feet_contacts_reg(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """接触模式正则：鼓励操作阶段保持 2 个脚接触。"""
-    # 读取接触传感器。
+    """Regulate feet contacts"""
+    # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    # 历史窗口接触力。
+    # check if contact force is above threshold
     # matrix_contact_forces = contact_sensor.data.force_matrix_w[:, sensor_cfg.body_ids, 0, :]
     net_contact_forces = contact_sensor.data.net_forces_w_history
-    # 每个脚在历史窗口中是否曾超阈值接触。
     is_contact = torch.max(torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1), dim=1)[0] > threshold
     # feet_contact_num = torch.sum(torch.norm(matrix_contact_forces, dim=-1) > threshold, dim=-1)
     # reward_loco = (feet_contact_num == 2) | (feet_contact_num == 4)
-    # 奖励条件：恰好 2 个脚接触。
     reward_mani = torch.sum(is_contact, dim=-1) == 2
 
-    # 位置误差用于附加缩放（位置偏差大时降低该奖励影响）。
     EE_position_error = env.command_manager.get_term("EE_pose").metrics["position_error"]
 
     position_scale = torch.exp(-EE_position_error / 0.5)
@@ -841,27 +603,23 @@ def feet_contacts_reg(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: Scen
     #     mu=0.8, decay_length=0.8, x=env.command_manager.get_term("EE_pose").se3_distance_ref
     # )
 
-    # 只在操作阶段有效。
     return reward_mani * (1 - env._loco_mani_scale) * position_scale
 
 
 def fly_penalty(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """离地惩罚标志：若所有脚都无接触则为 True。"""
-    # 读取接触传感器。
+    """Regulate feet contacts"""
+    # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    # 当前时刻接触力。
+    # check if contact force is above threshold
     net_contact_forces = contact_sensor.data.net_forces_w
 
-    # 超阈值接触脚数量。
     feet_contact_num = torch.sum(torch.norm(net_contact_forces, dim=-1) > threshold, dim=-1)
-    # 完全离地。
     reward = feet_contact_num == 0
 
     return reward
 
 
 def no_fly(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """非离地奖励：至少有一个脚接触地面。"""
     return 1 - fly_penalty(env, threshold, sensor_cfg).float()
 
 
@@ -878,42 +636,33 @@ class ActionSmoothnessPenaltyWrapper:
     """
 
     def __init__(self):
-        # t-2 时刻动作。
         self.prev_prev_action = None
-        # t-1 时刻动作。
         self.prev_action = None
-        # 供配置系统识别的可调用名字。
         self.__name__ = "action_smoothness_penalty"
 
     def __call__(self, env: ManagerBasedRLEnv) -> torch.Tensor:
-        """动作平滑惩罚：抑制动作二阶差分（近似 jerk）。"""
-        # 当前时刻动作。
+        """Penalize large instantaneous changes in the network action output"""
         current_action = env.action_manager.action.clone()
 
-        # 第一次调用：仅初始化历史，不惩罚。
         if self.prev_action is None:
             self.prev_action = current_action
             return torch.zeros(current_action.shape[0], device=current_action.device)
 
-        # 第二次调用：补齐两帧历史，不惩罚。
         if self.prev_prev_action is None:
             self.prev_prev_action = self.prev_action
             self.prev_action = current_action
             return torch.zeros(current_action.shape[0], device=current_action.device)
 
-        # 二阶差分: a_t - 2*a_{t-1} + a_{t-2}，对动作维求和。
         penalty = torch.sum(torch.square(current_action - 2 * self.prev_action + self.prev_prev_action), dim=1)
 
-        # 更新历史缓存，供下一步使用。
+        # Update actions for next call
         self.prev_prev_action = self.prev_action
         self.prev_action = current_action
 
-        # episode 起始前几步不计惩罚，避免初始条件导致的偏置。
         startup_env_musk = env.episode_length_buf < 3
         penalty[startup_env_musk] = 0
 
         return penalty
 
 
-# 导出实例，供 RewardsCfg 里直接作为 func 引用。
 action_smoothness_penalty = ActionSmoothnessPenaltyWrapper()

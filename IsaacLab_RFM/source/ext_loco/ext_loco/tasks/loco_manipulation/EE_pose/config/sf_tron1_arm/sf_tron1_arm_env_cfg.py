@@ -25,7 +25,7 @@ import ext_loco.tasks.loco_manipulation.EE_pose.mdp as mdp
 # Pre-defined configs
 ##
 # from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG  # isort: skip
-from .terrain.terrain import ROUGH_TERRAINS_CFG
+# from .terrain.terrain import ROUGH_TERRAINS_CFG
 from ext_loco.assets.limx import LIMX_SF_TRON1A_ARM
 
 ##
@@ -40,9 +40,9 @@ class MySceneCfg(InteractiveSceneCfg):
     # ground terrain
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
-        terrain_type="generator",
-        terrain_generator=ROUGH_TERRAINS_CFG,
-        max_init_terrain_level=5,
+        terrain_type="plane",
+        terrain_generator=None,
+        max_init_terrain_level=None,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -92,7 +92,7 @@ class CommandsCfg:
     # Training command: random world-frame target pose (point-wise command)
     EE_pose = mdp.UniformWorldPoseCommandCfg(
         asset_name="robot",
-        body_name="link6",
+        body_name="eef_link",
         resampling_time_range=(6.0, 15.0),
         resampling_time_scale=(0.5, 5.0),
         make_quat_unique=True,
@@ -104,7 +104,7 @@ class CommandsCfg:
             pitch=(-3.2, 3.2),
             yaw=(-3.2, 3.2),
         ),
-        se3_decrease_vel_range=(0.3, 0.8), # 原先是(0.5,1.4)
+        se3_decrease_vel_range=(0.5, 1.4),
         debug_vis=True,
     )
 
@@ -115,14 +115,14 @@ class CommandsCfgPlay:
 
     EE_pose = mdp.PicklePoseSequenceCommandCfg(
         asset_name="robot",
-        body_name="link6",
+        body_name="eef_link",
         # World frame EE pose pkl from umi
-        file_path="/home/edwin/Lab_Projects/New_WBC_training_umi-on-tron/data/pushing.pkl",
+        file_path="/home/phi5090ii/NYX/umi-on-tron-lab/IsaacLab_RFM/data/pushing.pkl",
         planar_center=True,
         # add_random_height_range=(-0.05, 0.05),
-        tip_offset_pos=(0.08657, -0.0249, -0.00024366),  # link6 -> tip (joint8 origin)
-        # rotate link6 to UMI tip frame: Rx(-90deg) then Rz(-90deg) (intrinsic XYZ with y=0)
-        tip_offset_rpy=(-math.pi * 0.5, 0.0, -math.pi * 0.5),
+        # eef_link is fixed at the UMI gripper base frame, so no extra link6->tip offset is applied.
+        tip_offset_pos=(0.0, 0.0, 0.0),
+        tip_offset_rpy=(0.0, 0.0, 0.0),
         episode_length_s=10,
         pose_latency=0.1,
         history_buffer_length=100,
@@ -138,6 +138,29 @@ class CommandsCfgPlay:
             pitch=(-3.2, 3.2),
             yaw=(-3.2, 3.2),
         ),
+    )
+
+
+@configclass
+class CommandsCfgCommandPlay:
+    """Play command: fixed EE target without loading a pickle trajectory."""
+
+    EE_pose = mdp.UniformWorldPoseCommandCfg(
+        asset_name="robot",
+        body_name="eef_link",
+        resampling_time_range=(1.0e9, 1.0e9),
+        resampling_time_scale=(1.0, 1.0),
+        make_quat_unique=True,
+        ranges=mdp.UniformPoseCommandCfg.Ranges(
+            pos_x=(-0.5, -0.5),
+            pos_y=(0.0, 0.0),
+            pos_z=(1.6, 1.6),
+            roll=(0.0, 0.0),
+            pitch=(0.0, 0.0),
+            yaw=(0.0, 0.0),
+        ),
+        se3_decrease_vel_range=(0.0, 0.0),
+        debug_vis=True,
     )
 
 
@@ -191,7 +214,7 @@ class ObservationsCfg:
         EE_pose = ObsTerm(
             func=mdp.EE_current_pose_b,
             noise=Unoise(n_min=-0.05, n_max=0.05),
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6")},
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link")},
         )  # 9
         EE_se3_distance_reference = ObsTerm(func=mdp.EE_se3_distance_ref) # 1
 
@@ -215,8 +238,8 @@ class ObservationsCfg:
         EE_pose = ObsTerm(
             func=mdp.EE_current_pose_b,
             noise=Unoise(n_min=-0.05, n_max=0.05),
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6")},
-        )  # 
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link")},
+        )  # 9
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -237,7 +260,7 @@ class ObservationsCfg:
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)  # 55
         EE_pose = ObsTerm(
             func=mdp.EE_current_pose_b,
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6")},
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link")},
         )  # 86
         foot_position_b = ObsTerm(
             func=mdp.foot_position_b,
@@ -264,11 +287,11 @@ class ObservationsCfg:
         joint_acc = ObsTerm(func=mdp.joint_acc)  # 167
         EE_lin_vel = ObsTerm(
             func=mdp.body_any_vel,
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6"), "vel_type": "linear"},
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link"), "vel_type": "linear"},
         )  
         EE_ang_vel = ObsTerm(
             func=mdp.body_any_vel,
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6"), "vel_type": "angular"},
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link"), "vel_type": "angular"},
         )  
         
         # EE_se3_cb_error = ObsTerm(func=mdp.EE_se3_cb_error, scale=3.0)  # 152
@@ -365,13 +388,22 @@ class EventCfg:
         },
     )
 
-    reset_robot_joints = EventTerm(
-        func=mdp.reset_joints_by_scale,
+    reset_tron_joints = EventTerm(
+        func=mdp.reset_selected_joints_by_offset,
         mode="reset",
         params={
-            # "position_range": (0.5, 1.5),
-            "position_range": (0.0, 0.0),
-            "velocity_range": (0.0, 0.0),
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=[
+                    "abad_[RL]_Joint",
+                    "hip_[RL]_Joint",
+                    "knee_[RL]_Joint",
+                    "ankle_[RL]_Joint",
+                ],
+            ),
+            # Randomize only the TRON leg and ankle joints.
+            "position_range": (-0.2, 0.2),
+            "velocity_range": (-0.2, 0.2),
         },
     )
 
@@ -386,11 +418,11 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Reward terms for the MDP."""  # 马尔可夫决策过程的奖励条件
+    """Reward terms for the MDP."""
 
     # Safety
     safety_exp = RewTerm(
-        func=mdp.safety_reward_exp, weight=1.0, params={"base_height_target": 0.8, "std": math.sqrt(0.5)}
+        func=mdp.safety_reward_exp, weight=2.0, params={"base_height_target": 0.8, "std": math.sqrt(0.5)}
     )
     # pose_product = RewTerm(
     #     func=mdp.pose_product_reward,
@@ -398,10 +430,10 @@ class RewardsCfg:
     #     params={"pos_sigma": 0.6, "orn_sigma": 2.0, "command_name": "EE_pose"},
     # )
     # EE Tracking
-    track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=2.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})
+    track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=2.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)}) #2
     track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=3.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})
-    track_EE_pb = RewTerm(func=mdp.track_EE_pb, weight=15.0)
-    track_EE_reference_exp = RewTerm(func=mdp.track_EE_reference_exp, weight=1.5, params={"std": math.sqrt(0.5), "init_value": 0.98})
+    track_EE_pb = RewTerm(func=mdp.track_EE_pb, weight=20.0)
+    track_EE_reference_exp = RewTerm(func=mdp.track_EE_reference_exp, weight=5.0, params={"std": math.sqrt(0.5), "init_value": 0.98})
 
     # Penalties
     # lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
@@ -459,7 +491,7 @@ class RewardsCfg:
     # dof_acc_l2 = RewTerm(
     #     func=mdp.joint_acc_l2, weight=-2.0e-6, params={"asset_cfg": SceneEntityCfg("robot", joint_names="J.*")}
     # )
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-1.0e-2)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.1) #1.0
     action_smoothness = RewTerm(func=mdp.action_smoothness_penalty, weight=-5.0e-4)
 
     # -- optional penalties
@@ -488,24 +520,34 @@ class RewardsCfg:
         weight=-1.5,
         params={"joint_names": ["J1", "J5"]},
     )
+    # base_bidirectional_target_alignment = RewTerm(
+    #     func=mdp.base_bidirectional_target_alignment,
+    #     weight=-2.0,
+    #     params={"command_name": "EE_pose", "min_target_distance": 0.1},
+    # )
     feet_contacts_reg = RewTerm(
         func=mdp.feet_contacts_reg,
         weight=0.5,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"), "threshold": 5.0},
     )
-    # legs_min_separation = RewTerm(
-    #     func=mdp.legs_min_separation,
-    #     weight=-1.0,
-    #     params={"min_distance": 0.2, "body_names": ("ankle_L_Link", "ankle_R_Link")},
-    # )
-    feet_lateral_distance = RewTerm(
-        func=mdp.feet_lateral_distance_exp,
-        weight=-10.0,
+    foot_flat_l2 = RewTerm(
+        func=mdp.foot_flat_l2,
+        weight=-2.0,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*")},
+    )
+    foot_slip_l2 = RewTerm(
+        func=mdp.foot_slip_l2,
+        weight=-1.0,
         params={
-            "min_distance": 0.21,
-            "body_names": ("ankle_L_Link", "ankle_R_Link"),
-            "axis": "y",
+            "asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*"),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"),
+            "threshold": 5.0,
         },
+    )
+    legs_min_separation = RewTerm(
+        func=mdp.legs_min_separation,
+        weight=-10,
+        params={"min_distance": 0.2, "body_names": ("ankle_L_Link", "ankle_R_Link"), "axis": "y"},
     )
 
     # base_height = RewTerm(
@@ -514,7 +556,7 @@ class RewardsCfg:
     #     params={"target_height": 0.8, "sensor_cfg": SceneEntityCfg("height_scanner")},
     # )
 
-    # termination_penalty = RewTerm(func=mdp.is_terminated, weight=-1000)
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-1000)
     # alive = RewTerm(func=mdp.stay_alive, weight=2.0)
 
 
@@ -642,10 +684,13 @@ class LimxEEposeRoughEnvCfg_PLAY(LimxEEposeRoughEnvCfg):
         # make a smaller scene for play
         self.scene.num_envs = 50
         self.scene.env_spacing = 2.5
-        # Flat ground plane for trajectory playback (cleaner than rough terrain for eval).
-        self.scene.terrain.terrain_type = "plane"
-        self.scene.terrain.terrain_generator = None
+        # spawn the robot randomly in the grid (instead of their terrain levels)
         self.scene.terrain.max_init_terrain_level = None
+        # reduce the number of terrains to save memory
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 5
+            self.scene.terrain.terrain_generator.curriculum = False
 
         # disable observation noise for play
         self.observations.policy.enable_corruption = False
@@ -663,6 +708,8 @@ class LimxEEposeRoughEnvCfg_PLAY(LimxEEposeRoughEnvCfg):
             "x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
             "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
         }
+        self.events.reset_tron_joints.params["position_range"] = (0.0, 0.0)
+        self.events.reset_tron_joints.params["velocity_range"] = (0.0, 0.0)
 
         # only end episodes on time_out (= trajectory complete); disable all other
         # terminations that would interrupt trajectory playback mid-way
@@ -673,3 +720,52 @@ class LimxEEposeRoughEnvCfg_PLAY(LimxEEposeRoughEnvCfg):
 
         # synchronise env episode length with the trajectory length from the command
         self.episode_length_s = self.commands.EE_pose.episode_length_s
+
+
+@configclass
+class LimxEEposeCommandEnvCfg_PLAY(LimxEEposeRoughEnvCfg):
+    def __post_init__(self):
+        # post init of parent
+        super().__post_init__()
+
+        # Use a fixed EE command for play/eval instead of a pickle trajectory.
+        self.commands = CommandsCfgCommandPlay()
+
+        # This task uses one fixed target pose.  The inherited training
+        # curricula expand symmetric command ranges at reset, which turns the
+        # fixed negative x target into an invalid (min > max) range.
+        self.curriculum = None
+
+        # make a smaller scene for play
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.scene.terrain.max_init_terrain_level = None
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 5
+            self.scene.terrain.terrain_generator.curriculum = False
+
+        # disable observation noise for play
+        self.observations.policy.enable_corruption = False
+
+        # remove random disturbances
+        del self.events.base_external_force_torque
+        del self.events.push_robot
+
+        # reset robot to a fixed default pose.
+        self.events.reset_base.params["pose_range"] = {
+            "x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)
+        }
+        self.events.reset_base.params["velocity_range"] = {
+            "x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
+            "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
+        }
+        self.events.reset_tron_joints.params["position_range"] = (0.0, 0.0)
+        self.events.reset_tron_joints.params["velocity_range"] = (0.0, 0.0)
+
+        # keep the fixed-command play running until the user closes the app.
+        del self.terminations.base_contact
+        del self.terminations.bad_orientation
+        del self.terminations.ee_contact
+        del self.terminations.bad_height
+        self.episode_length_s = 10

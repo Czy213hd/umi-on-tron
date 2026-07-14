@@ -15,6 +15,11 @@ IsaacLab_RFM/data/*.pkl
 # ── IsaacSim 缓存 / 符号链接 ────────────────────────────────
 IsaacLab_RFM/_isaac_sim/
 
+# ── 本地比较仓库与可由 URDF 重新生成的 USD 缓存 ───────────────
+/.compare/
+IsaacLab_RFM/source/ext_loco/ext_loco/assets/SF_TRON1A_ARXR5ARM/assembly/
+tron1_ws/src/tron1-rl-deploy-arm/src/robot-description/pointfoot/SF_TRON1A_ARXR5ARM/assembly/
+
 # ── Python 缓存 ──────────────────────────────────────────────
 __pycache__/
 *.py[cod]

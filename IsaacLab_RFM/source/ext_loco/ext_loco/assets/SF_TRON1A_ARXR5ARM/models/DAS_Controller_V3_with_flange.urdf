@@ -1,0 +1,468 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com)
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="DAS_Controller_V3_with_flange">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-0.00473369666263078 0.000235956784116321 -0.0608228433401642"
+        rpy="0 0 0" />
+      <mass
+        value="0.149856577681617" />
+      <inertia
+        ixx="0.00018830674510593"
+        ixy="-6.78422090666385E-08"
+        ixz="-1.96182253543102E-05"
+        iyy="0.000106763841779269"
+        iyz="1.81634805776435E-07"
+        izz="0.000171533715802352" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="link1">
+    <inertial>
+      <origin
+        xyz="0.0115012193603452 0.0137058307430064 -0.00861235542549358"
+        rpy="0 0 0" />
+      <mass
+        value="0.02093495331508" />
+      <inertia
+        ixx="6.73989068995237E-06"
+        ixy="-3.95839022559359E-06"
+        ixz="2.01490719917717E-07"
+        iyy="5.2567343731997E-06"
+        iyz="3.13955918088435E-07"
+        izz="1.15095149501083E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint1"
+    type="revolute">
+    <origin
+      xyz="0.022786 0.042961 -0.059233"
+      rpy="0 -0.2618 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="link1" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="0.925"
+      effort="100"
+      velocity="1" />
+  </joint>
+  <link
+    name="link3">
+    <inertial>
+      <origin
+        xyz="0.0281972854196237 -0.0278445505366139 -0.00938621959400143"
+        rpy="0 0 0" />
+      <mass
+        value="0.0203237501202117" />
+      <inertia
+        ixx="8.44286661949908E-07"
+        ixy="4.18698059122221E-07"
+        ixz="2.15036107726852E-12"
+        iyy="4.90959334176647E-06"
+        iyz="2.50859869970747E-14"
+        izz="4.88890712917801E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.498039215686275 0.498039215686275 0.498039215686275 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint3"
+    type="revolute">
+    <origin
+      xyz="0.043182 0.04579 0"
+      rpy="0 0 0" />
+    <parent
+      link="link1" />
+    <child
+      link="link3" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-0.925"
+      upper="0"
+      effort="100"
+      velocity="1" />
+    <mimic
+      joint="joint1"
+      multiplier="-1"
+      offset="0" />
+  </joint>
+  <link
+    name="link2">
+    <inertial>
+      <origin
+        xyz="0.0105744231181954 -0.0122453518603421 -0.0114433659540572"
+        rpy="0 0 0" />
+      <mass
+        value="0.0316631540861347" />
+      <inertia
+        ixx="1.05927284042654E-05"
+        ixy="6.10689347695809E-06"
+        ixz="1.97264023531489E-07"
+        iyy="8.10377382222261E-06"
+        iyz="-3.18047314667756E-07"
+        izz="1.8172684743536E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint2"
+    type="revolute">
+    <origin
+      xyz="0.022786 -0.043039 -0.059233"
+      rpy="0 -0.2618 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="link2" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-0.925"
+      upper="0"
+      effort="100"
+      velocity="1" />
+    <mimic
+      joint="joint1"
+      multiplier="-1"
+      offset="0" />
+  </joint>
+  <link
+    name="link4">
+    <inertial>
+      <origin
+        xyz="0.0281972854196394 0.0278445505366352 -0.00938623119932044"
+        rpy="0 0 0" />
+      <mass
+        value="0.0203237501202117" />
+      <inertia
+        ixx="8.44286661950155E-07"
+        ixy="-4.1869805912325E-07"
+        ixz="-2.15036110100873E-12"
+        iyy="4.90959334176622E-06"
+        iyz="2.50859839891789E-14"
+        izz="4.88890712917801E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link4.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.498039215686275 0.498039215686275 0.498039215686275 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint4"
+    type="revolute">
+    <origin
+      xyz="0.043182 -0.04579 0"
+      rpy="0 0 0" />
+    <parent
+      link="link2" />
+    <child
+      link="link4" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="0.925"
+      effort="100"
+      velocity="1" />
+    <mimic
+      joint="joint2"
+      multiplier="-1"
+      offset="0" />
+  </joint>
+  <link
+    name="link5">
+    <inertial>
+      <origin
+        xyz="0.0171977063474686 0.0220137207199803 -0.00935146125962831"
+        rpy="0 0 0" />
+      <mass
+        value="0.00905477894016241" />
+      <inertia
+        ixx="1.76482236516288E-06"
+        ixy="-1.09908418746098E-06"
+        ixz="-5.25688530562007E-15"
+        iyy="1.33793246136844E-06"
+        iyz="-2.51436712790506E-17"
+        izz="2.38165348606961E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link5.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.796078431372549 0.823529411764706 0.937254901960784 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint5"
+    type="revolute">
+    <origin
+      xyz="0.037516 0.019478 -0.055286"
+      rpy="0 -0.2618 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="link5" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="0.925"
+      effort="100"
+      velocity="0" />
+    <mimic
+      joint="joint1"
+      multiplier="1"
+      offset="0" />
+  </joint>
+  <link
+    name="link6">
+    <inertial>
+      <origin
+        xyz="0.0171977063705079 -0.0220137207558635 -0.00935146123890655"
+        rpy="0 0 0" />
+      <mass
+        value="0.00905477890179401" />
+      <inertia
+        ixx="1.76482235928743E-06"
+        ixy="1.09908418412139E-06"
+        ixz="6.77470977871522E-15"
+        iyy="1.33793245801761E-06"
+        iyz="-2.13943787240014E-15"
+        izz="2.38165347850042E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link6.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.796078431372549 0.823529411764706 0.937254901960784 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link6.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint6"
+    type="revolute">
+    <origin
+      xyz="0.037516 -0.019556 -0.055286"
+      rpy="0 -0.2618 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="link6" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-0.925"
+      upper="0"
+      effort="100"
+      velocity="1" />
+    <mimic
+      joint="joint2"
+      multiplier="1"
+      offset="0" />
+  </joint>
+  <link
+    name="link_Flange">
+    <inertial>
+      <origin
+        xyz="0.00904036460093721 -9.03917189348789E-11 0.000393441133830726"
+        rpy="0 0 0" />
+      <mass
+        value="0.0139886523044545" />
+      <inertia
+        ixx="3.33382539864384E-06"
+        ixy="-2.60843892609458E-15"
+        ixz="-2.1563018545546E-08"
+        iyy="1.89789021267794E-06"
+        iyz="2.55399656626754E-14"
+        izz="1.97123755230916E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link_Flange.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DAS_Controller_V3_with_flange/meshes/link_Flange.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint_Flange"
+    type="fixed">
+    <origin
+      xyz="-0.067889 -3.8794E-05 -0.097619"
+      rpy="0 -0.2618 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="link_Flange" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+</robot>

@@ -15,6 +15,37 @@ if TYPE_CHECKING:
 from ext_loco.utils.math import generate_sigmoid_scale
 
 
+def reset_selected_joints_by_offset(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    position_range: tuple[float, float],
+    velocity_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """Reset all joints to default and randomize only the selected joints."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_pos = asset.data.default_joint_pos[env_ids].clone()
+    joint_vel = asset.data.default_joint_vel[env_ids].clone()
+    joint_ids = asset_cfg.joint_ids
+
+    selected_pos = joint_pos[:, joint_ids]
+    selected_vel = joint_vel[:, joint_ids]
+    joint_pos[:, joint_ids] = selected_pos + sample_uniform(
+        *position_range, selected_pos.shape, selected_pos.device
+    )
+    joint_vel[:, joint_ids] = selected_vel + sample_uniform(
+        *velocity_range, selected_vel.shape, selected_vel.device
+    )
+
+    joint_pos.clamp_(
+        asset.data.soft_joint_pos_limits[env_ids, :, 0],
+        asset.data.soft_joint_pos_limits[env_ids, :, 1],
+    )
+    joint_vel_limits = asset.data.soft_joint_vel_limits[env_ids]
+    joint_vel.clamp_(-joint_vel_limits, joint_vel_limits)
+    asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+
+
 def upate_EE_reference_and_cb(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor | None,
@@ -93,7 +124,7 @@ def prepare_quantity_for_tron1_piper(
 
     arm_joint_idx, _ = asset.find_joints(r"J\d")
 
-    ee_link_idx, _ = asset.find_bodies("link6")
+    ee_link_idx, _ = asset.find_bodies("eef_link")
 
     base_idx, _ = asset.find_bodies("base_Link")
 
@@ -129,5 +160,3 @@ def prepare_quantity_for_tron1_piper(
     env._arm_joint_ids = arm_joint_idx                     # type: ignore
     env._ee_link_idx = ee_link_idx                         # type: ignore
     env._foot_radius = 0.127                               # type: ignore
-
-

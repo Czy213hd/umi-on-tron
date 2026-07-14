@@ -86,7 +86,10 @@ class ImplicitOneStageRunner:
         self.actor_critic = actor_critic
         self.gru = gru
 
-        self.ppo_alg = PPO_IOS(actor_critic, gru, self.contactNet, device=self.device, **self.ppo_alg_cfg)
+        ppo_ios_cfg = dict(self.ppo_alg_cfg)
+        for key in ("p_mean", "p_std", "zero_action_input", "condition_drop_ratio"):
+            ppo_ios_cfg.pop(key, None)
+        self.ppo_alg = PPO_IOS(actor_critic, gru, self.contactNet, device=self.device, **ppo_ios_cfg)
 
         self.cn_obs_hist_len = self.cfg["cn_obs_hist_len"]
         assert self.cn_obs_hist_len == contactnet_obs_hist.shape[1]
