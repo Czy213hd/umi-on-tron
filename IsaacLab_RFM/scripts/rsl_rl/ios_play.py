@@ -26,6 +26,11 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument(
+    "--export-only",
+    action="store_true",
+    help="Export the loaded checkpoint to ONNX and exit without entering the play loop.",
+)
 # parser.add_argument("--use_teleop", type=str, default=False, help="Use Device for interacting with environment")
 
 # append RSL-RL cli arguments
@@ -175,6 +180,10 @@ def main():
         path=export_model_dir,
         filename="gru.onnx",
     )
+    if args_cli.export_only:
+        print(f"[INFO] Exported actor/contactNet/gru ONNX files to: {export_model_dir}")
+        env.close()
+        return
     # export_cn_policy_as_onnx(
     #     runner.num_obs,
     #     agent_cfg.contactNet.output_dim - agent_cfg.contactNet.latent_dim - 4,

@@ -44,40 +44,39 @@ DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
 TIP_OFFSET_POS = np.array([0.08657, -0.0249, -0.00024366], dtype=np.float64)
 TIP_OFFSET_RPY = (-math.pi * 0.5, 0.0, -math.pi * 0.5)
 
-# This order must match PointfootCfg.init_state.joint_names and the training
-# articulation order. It is intentionally not MuJoCo's internal joint order.
+# Isaac Lab articulation/action order measured from the training environment.
 JOINT_NAMES = (
-    "J1",
     "abad_L_Joint",
     "abad_R_Joint",
-    "J2",
     "hip_L_Joint",
     "hip_R_Joint",
-    "J3",
     "knee_L_Joint",
     "knee_R_Joint",
-    "J4",
+    "J1",
     "ankle_L_Joint",
     "ankle_R_Joint",
+    "J2",
+    "J3",
+    "J4",
     "J5",
     "J6",
 )
 DEFAULT_JOINT_POS = np.array(
-    [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
 )
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
-    [18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 4.0, 45.0, 45.0, 4.0, 4.0],
+    [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 18.0, 45.0, 45.0, 18.0, 18.0, 4.0, 4.0, 4.0],
     dtype=np.float64,
 )
 KD = np.array(
-    [1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 0.5, 0.8, 0.8, 0.5, 0.5],
+    [1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.0, 0.8, 0.8, 1.0, 1.0, 0.5, 0.5, 0.5],
     dtype=np.float64,
 )
 TORQUE_LIMIT = np.array(
-    [18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 3.0, 40.0, 40.0, 3.0, 3.0],
+    [80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 18.0, 40.0, 40.0, 18.0, 18.0, 3.0, 3.0, 3.0],
     dtype=np.float64,
 )
 
@@ -91,6 +90,10 @@ HISTORY_LENGTH = 10
 OBS_DIM = 65
 CONTACT_OBS_DIM = 55
 ACTION_DIM = 14
+# MuJoCo friction is (sliding, torsional, rolling), not static/dynamic/rolling.
+# Keep deterministic sim2sim at the IsaacLab terrain's nominal coefficient;
+# IsaacLab's training-side material randomization remains untouched.
+MUJOCO_CONTACT_FRICTION = "1.0 0.005 0.0001"
 
 
 def parse_args() -> argparse.Namespace:
@@ -394,7 +397,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
                 "type": "plane",
                 "size": "0 0 0.1",
                 "rgba": "0.32 0.35 0.38 1",
-                "friction": "0.8 0.6 0.001",
+                "friction": MUJOCO_CONTACT_FRICTION,
                 "condim": "3",
                 "solref": "0.005 1",
                 "solimp": "0.95 0.99 0.001",

@@ -335,8 +335,8 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.8, 0.8),
-            "dynamic_friction_range": (0.6, 0.6),
+            "static_friction_range": (0.6, 1),       # by CZY
+            "dynamic_friction_range": (0.4, 0.9),    # by CZY
             "restitution_range": (0.0, 0.0),
             "num_buckets": 64,
         },
@@ -348,7 +348,7 @@ class EventCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base_Link"),
             # "mass_distribution_params": (-5.0, 5.0),
-            "mass_distribution_params": (-0.5, 2.0),
+            "mass_distribution_params": (-0.5, 3.0),   # by CZY
             "operation": "add",
         },
     )
@@ -491,7 +491,7 @@ class RewardsCfg:
     # dof_acc_l2 = RewTerm(
     #     func=mdp.joint_acc_l2, weight=-2.0e-6, params={"asset_cfg": SceneEntityCfg("robot", joint_names="J.*")}
     # )
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.1) #1.0
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.1) #1.0 By Edwin
     action_smoothness = RewTerm(func=mdp.action_smoothness_penalty, weight=-5.0e-4)
 
     # -- optional penalties
@@ -530,20 +530,20 @@ class RewardsCfg:
         weight=0.5,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"), "threshold": 5.0},
     )
-    foot_flat_l2 = RewTerm(
-        func=mdp.foot_flat_l2,
-        weight=-2.0,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*")},
-    )
-    foot_slip_l2 = RewTerm(
-        func=mdp.foot_slip_l2,
-        weight=-1.0,
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*"),
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"),
-            "threshold": 5.0,
-        },
-    )
+    # foot_flat_l2 = RewTerm(
+    #     func=mdp.foot_flat_l2,
+    #     weight=-2.0,
+    #     params={"asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*")},
+    # )
+    # foot_slip_l2 = RewTerm(
+    #     func=mdp.foot_slip_l2,
+    #     weight=-2.0,                      # by Edwin
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*"),
+    #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"),
+    #         "threshold": 5.0,
+    #     },
+    # )
     legs_min_separation = RewTerm(
         func=mdp.legs_min_separation,
         weight=-10,

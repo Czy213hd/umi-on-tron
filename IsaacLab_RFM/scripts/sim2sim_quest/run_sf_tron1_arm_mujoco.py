@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import pickle
 import sys
 import threading
@@ -40,25 +41,27 @@ DEPLOYED_MODEL_DIR = (
     / "tron1_ws/src/tron1-rl-deploy-arm/src/robot_controllers/config/"
     "pointfoot/SF_TRON1A_ARX5ARM/policy"
 )
+WBC_LOG_ROOT = Path(os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs"))
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
-TIP_OFFSET_POS = np.array([0.08657, -0.0249, -0.00024366], dtype=np.float64)
-TIP_OFFSET_RPY = (-math.pi * 0.5, 0.0, -math.pi * 0.5)
+# Training tracks the URDF's eef_link directly, so no legacy link6 -> tip
+# transform is applied during trajectory playback.
+TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
+TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
 
-# This order must match PointfootCfg.init_state.joint_names and the training
-# articulation order. It is intentionally not MuJoCo's internal joint order.
+# Isaac Lab articulation/action order measured from the training environment.
 JOINT_NAMES = (
-    "J1",
     "abad_L_Joint",
     "abad_R_Joint",
-    "J2",
     "hip_L_Joint",
     "hip_R_Joint",
-    "J3",
     "knee_L_Joint",
     "knee_R_Joint",
-    "J4",
+    "J1",
     "ankle_L_Joint",
     "ankle_R_Joint",
+    "J2",
+    "J3",
+    "J4",
     "J5",
     "J6",
 )
@@ -76,21 +79,21 @@ ARM_NAMES = ("J1", "J2", "J3", "J4", "J5", "J6")
 LEG_IDS = np.array([JOINT_NAMES.index(name) for name in LEG_NAMES], dtype=int)
 ARM_IDS = np.array([JOINT_NAMES.index(name) for name in ARM_NAMES], dtype=int)
 DEFAULT_JOINT_POS = np.array(
-    [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
 )
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
-    [18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 4.0, 45.0, 45.0, 4.0, 4.0],
+    [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 18.0, 45.0, 45.0, 18.0, 18.0, 4.0, 4.0, 4.0],
     dtype=np.float64,
 )
 KD = np.array(
-    [1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 0.5, 0.8, 0.8, 0.5, 0.5],
+    [1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.0, 0.8, 0.8, 1.0, 1.0, 0.5, 0.5, 0.5],
     dtype=np.float64,
 )
 TORQUE_LIMIT = np.array(
-    [18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 3.0, 40.0, 40.0, 3.0, 3.0],
+    [80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 18.0, 40.0, 40.0, 18.0, 18.0, 3.0, 3.0, 3.0],
     dtype=np.float64,
 )
 
@@ -104,6 +107,10 @@ HISTORY_LENGTH = 10
 OBS_DIM = 65
 CONTACT_OBS_DIM = 55
 ACTION_DIM = 14
+# MuJoCo friction is (sliding, torsional, rolling), not static/dynamic/rolling.
+# Keep deterministic sim2sim at the IsaacLab terrain's nominal coefficient;
+# IsaacLab's training-side material randomization remains untouched.
+MUJOCO_CONTACT_FRICTION = "1.0 0.005 0.0001"
 
 
 def format_named(names: tuple[str, ...], values: np.ndarray) -> str:
@@ -136,7 +143,7 @@ def parse_args() -> argparse.Namespace:
         "--model-dir",
         type=Path,
         help="Directory containing actor.onnx, contactNet.onnx and gru.onnx. "
-        "Default: newest exported training run.",
+        "Default: newest exported run under WBC_LOG_ROOT, then the legacy local log.",
     )
     parser.add_argument(
         "--duration",
@@ -226,14 +233,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def newest_exported_model_dir() -> Path:
-    log_root = ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm"
+    log_roots = (
+        WBC_LOG_ROOT,
+        ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm",
+    )
     candidates = [
         path
+        for log_root in log_roots
         for path in log_root.glob("*/exported")
         if all((path / name).is_file() for name in ("actor.onnx", "contactNet.onnx", "gru.onnx"))
     ]
     if candidates:
-        return max(candidates, key=lambda path: path.parent.name)
+        return max(candidates, key=lambda path: (path.parent.stat().st_mtime_ns, path.parent.name))
     return DEPLOYED_MODEL_DIR
 
 
@@ -447,7 +458,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
                 "type": "plane",
                 "size": "0 0 0.1",
                 "rgba": "0.32 0.35 0.38 1",
-                "friction": "0.8 0.6 0.001",
+                "friction": MUJOCO_CONTACT_FRICTION,
                 "condim": "3",
                 "solref": "0.005 1",
                 "solimp": "0.95 0.99 0.001",
@@ -512,6 +523,53 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
             },
         )
     worldbody.insert(2, target_frame)
+
+    # Render the measured eef_link pose with the same RGB coordinate frame as
+    # the command target. Sites are visual only and move with eef_link.
+    eef_frame = worldbody.find(".//body[@name='eef_link']")
+    if eef_frame is None:
+        raise ValueError("eef_link body is missing from MJCF")
+    ET.SubElement(
+        eef_frame,
+        "site",
+        {
+            "name": "current_eef",
+            "type": "sphere",
+            "size": "0.012",
+            "rgba": "1 1 1 0.9",
+            "group": "0",
+        },
+    )
+    for name, endpoint, color in (
+        ("current_eef_x", "0.16 0 0", "1 0.12 0.05 1"),
+        ("current_eef_y", "0 0.16 0", "0.1 0.9 0.2 1"),
+        ("current_eef_z", "0 0 0.16", "0.1 0.35 1 1"),
+    ):
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": name,
+                "type": "capsule",
+                "fromto": f"0 0 0 {endpoint}",
+                "size": "0.007",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": f"{name}_tip",
+                "type": "sphere",
+                "pos": endpoint,
+                "size": "0.014",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+
     xml = ET.tostring(root, encoding="unicode")
     return mujoco.MjModel.from_xml_string(xml)
 
@@ -664,7 +722,7 @@ class Sim2Sim:
             raise ValueError("One or more joint motors are missing from the MJCF")
 
         self.base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
-        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "link6")
+        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "eef_link")
         self.target_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "command_target")
         target_frame_body_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_BODY, "command_target_frame"

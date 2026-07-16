@@ -14,8 +14,9 @@ Hold the left-controller Grip button to control end-effector orientation:
 
     target_rotation = controller_rotation_delta @ ee_rotation_at_grip_press
 
-The right-controller front Trigger controls the simulated gripper
-continuously: released is open and fully pressed is closed.
+The current URDF represents the UMI gripper as fixed geometry. The right
+controller front Trigger is therefore accepted only for input compatibility;
+it does not add untrained gripper degrees of freedom to the model.
 
 The original sim2sim script is intentionally left unchanged.
 """
@@ -25,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import pickle
 import subprocess
 import sys
@@ -52,12 +54,15 @@ DEPLOYED_MODEL_DIR = (
     / "tron1_ws/src/tron1-rl-deploy-arm/src/robot_controllers/config/"
     "pointfoot/SF_TRON1A_ARX5ARM/policy"
 )
+WBC_LOG_ROOT = Path(os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs"))
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
 DEFAULT_QUEST_BRIDGE = Path(
     "/home/phi5090ii/steamvr/build/quest_controller_bridge"
 )
-TIP_OFFSET_POS = np.array([0.08657, -0.0249, -0.00024366], dtype=np.float64)
-TIP_OFFSET_RPY = (-math.pi * 0.5, 0.0, -math.pi * 0.5)
+# Training tracks the URDF's eef_link directly, so no legacy link6 -> tip
+# transform is applied during trajectory playback.
+TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
+TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
 
 # OpenVR is X-right, Y-up, Z-backward. The robot base convention used here is
 # X-forward, Y-left, Z-up. This is a proper rotation (determinant +1).
@@ -70,21 +75,20 @@ ROBOT_FROM_OPENVR = np.array(
     dtype=np.float64,
 )
 
-# This order must match PointfootCfg.init_state.joint_names and the training
-# articulation order. It is intentionally not MuJoCo's internal joint order.
+# Isaac Lab articulation/action order measured from the training environment.
 JOINT_NAMES = (
-    "J1",
     "abad_L_Joint",
     "abad_R_Joint",
-    "J2",
     "hip_L_Joint",
     "hip_R_Joint",
-    "J3",
     "knee_L_Joint",
     "knee_R_Joint",
-    "J4",
+    "J1",
     "ankle_L_Joint",
     "ankle_R_Joint",
+    "J2",
+    "J3",
+    "J4",
     "J5",
     "J6",
 )
@@ -102,21 +106,21 @@ ARM_NAMES = ("J1", "J2", "J3", "J4", "J5", "J6")
 LEG_IDS = np.array([JOINT_NAMES.index(name) for name in LEG_NAMES], dtype=int)
 ARM_IDS = np.array([JOINT_NAMES.index(name) for name in ARM_NAMES], dtype=int)
 DEFAULT_JOINT_POS = np.array(
-    [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
 )
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
-    [18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 4.0, 45.0, 45.0, 4.0, 4.0],
+    [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 18.0, 45.0, 45.0, 18.0, 18.0, 4.0, 4.0, 4.0],
     dtype=np.float64,
 )
 KD = np.array(
-    [1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 0.5, 0.8, 0.8, 0.5, 0.5],
+    [1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.0, 0.8, 0.8, 1.0, 1.0, 0.5, 0.5, 0.5],
     dtype=np.float64,
 )
 TORQUE_LIMIT = np.array(
-    [18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 3.0, 40.0, 40.0, 3.0, 3.0],
+    [80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 18.0, 40.0, 40.0, 18.0, 18.0, 3.0, 3.0, 3.0],
     dtype=np.float64,
 )
 
@@ -130,20 +134,10 @@ HISTORY_LENGTH = 10
 OBS_DIM = 65
 CONTACT_OBS_DIM = 55
 ACTION_DIM = 14
-SIM_GRIPPER_MAX_ANGLE = 0.925
-SIM_GRIPPER_JOINT_NAMES = (
-    "assembly_DAS_Controller_V3_with_flange_joint1",
-    "assembly_DAS_Controller_V3_with_flange_joint2",
-    "assembly_DAS_Controller_V3_with_flange_joint3",
-    "assembly_DAS_Controller_V3_with_flange_joint4",
-    "assembly_DAS_Controller_V3_with_flange_joint5",
-    "assembly_DAS_Controller_V3_with_flange_joint6",
-)
-SIM_GRIPPER_JOINT_MULTIPLIERS = np.array(
-    [1.0, -1.0, -1.0, 1.0, 1.0, -1.0],
-    dtype=np.float64,
-)
-SIM_GRIPPER_ACTUATOR_NAME = "sim_gripper_position"
+# MuJoCo friction is (sliding, torsional, rolling), not static/dynamic/rolling.
+# Keep deterministic sim2sim at the IsaacLab terrain's nominal coefficient;
+# IsaacLab's training-side material randomization remains untouched.
+MUJOCO_CONTACT_FRICTION = "1.0 0.005 0.0001"
 
 
 def format_named(names: tuple[str, ...], values: np.ndarray) -> str:
@@ -166,7 +160,7 @@ def parse_args() -> argparse.Namespace:
         "--model-dir",
         type=Path,
         help="Directory containing actor.onnx, contactNet.onnx and gru.onnx. "
-        "Default: newest exported training run.",
+        "Default: newest exported run under WBC_LOG_ROOT, then the legacy local log.",
     )
     parser.add_argument(
         "--duration",
@@ -247,14 +241,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def newest_exported_model_dir() -> Path:
-    log_root = ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm"
+    log_roots = (
+        WBC_LOG_ROOT,
+        ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm",
+    )
     candidates = [
         path
+        for log_root in log_roots
         for path in log_root.glob("*/exported")
         if all((path / name).is_file() for name in ("actor.onnx", "contactNet.onnx", "gru.onnx"))
     ]
     if candidates:
-        return max(candidates, key=lambda path: path.parent.name)
+        return max(candidates, key=lambda path: (path.parent.stat().st_mtime_ns, path.parent.name))
     return DEPLOYED_MODEL_DIR
 
 
@@ -534,7 +532,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
                 "type": "plane",
                 "size": "0 0 0.1",
                 "material": "sim2sim_checker_material",
-                "friction": "0.8 0.6 0.001",
+                "friction": MUJOCO_CONTACT_FRICTION,
                 "condim": "3",
                 "solref": "0.005 1",
                 "solimp": "0.95 0.99 0.001",
@@ -552,7 +550,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
     # Fixed frame plus a physical door panel that swings about a vertical
     # hinge. It sits in front of the robot and can be pushed or grasped.
     contact_parameters = {
-        "friction": "0.8 0.1 0.001",
+        "friction": MUJOCO_CONTACT_FRICTION,
         "condim": "3",
         "solref": "0.005 1",
         "solimp": "0.95 0.99 0.001",
@@ -693,94 +691,57 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
         )
     worldbody.insert(2, target_frame)
 
-    # The checked-in MJCF locks the DAS gripper. Restore the six revolute
-    # joints from the original robot-description revision. Joint 1 is the
-    # driver; joints 2-6 follow the original URDF mimic relationships.
-    gripper_joint_specs = (
-        ("assembly_DAS_Controller_V3_with_flange_link1", SIM_GRIPPER_JOINT_NAMES[0], 0.0, 0.925),
-        ("assembly_DAS_Controller_V3_with_flange_link2", SIM_GRIPPER_JOINT_NAMES[1], -0.925, 0.0),
-        ("assembly_DAS_Controller_V3_with_flange_link3", SIM_GRIPPER_JOINT_NAMES[2], -0.925, 0.0),
-        ("assembly_DAS_Controller_V3_with_flange_link4", SIM_GRIPPER_JOINT_NAMES[3], 0.0, 0.925),
-        ("assembly_DAS_Controller_V3_with_flange_link5", SIM_GRIPPER_JOINT_NAMES[4], 0.0, 0.925),
-        ("assembly_DAS_Controller_V3_with_flange_link6", SIM_GRIPPER_JOINT_NAMES[5], -0.925, 0.0),
-    )
-    for body_name, joint_name, lower, upper in gripper_joint_specs:
-        body = worldbody.find(f".//body[@name='{body_name}']")
-        if body is None:
-            raise ValueError(f"Gripper body is missing from MJCF: {body_name}")
-        joint = ET.Element(
-            "joint",
-            {
-                "name": joint_name,
-                "type": "hinge",
-                "axis": "0 0 -1",
-                "limited": "true",
-                "range": f"{lower} {upper}",
-                "damping": "0.1",
-                "armature": "0.001",
-            },
-        )
-        # Keep the conventional inertial -> joint -> geom ordering.
-        body.insert(1 if body.find("inertial") is not None else 0, joint)
-
-    equality = root.find("equality")
-    if equality is None:
-        equality = ET.SubElement(root, "equality")
-    for joint_name, multiplier in zip(
-        SIM_GRIPPER_JOINT_NAMES[1:],
-        SIM_GRIPPER_JOINT_MULTIPLIERS[1:],
-    ):
-        ET.SubElement(
-            equality,
-            "joint",
-            {
-                "name": f"{joint_name}_mimic",
-                "joint1": joint_name,
-                "joint2": SIM_GRIPPER_JOINT_NAMES[0],
-                "polycoef": f"0 {multiplier} 0 0 0",
-                "solref": "0.002 1",
-            },
-        )
-
-    # The detailed CAD collision meshes overlap slightly at their pivots.
-    # Suppress only self-contact inside the gripper mechanism; contacts with
-    # objects in the scene remain enabled.
-    contact = root.find("contact")
-    if contact is None:
-        contact = ET.SubElement(root, "contact")
-    gripper_bodies = (
-        "assembly_DAS_Controller_V3_with_flange",
-        "assembly_DAS_Controller_V3_with_flange_link1",
-        "assembly_DAS_Controller_V3_with_flange_link2",
-        "assembly_DAS_Controller_V3_with_flange_link3",
-        "assembly_DAS_Controller_V3_with_flange_link4",
-        "assembly_DAS_Controller_V3_with_flange_link5",
-        "assembly_DAS_Controller_V3_with_flange_link6",
-    )
-    for first_index, first_body in enumerate(gripper_bodies):
-        for second_body in gripper_bodies[first_index + 1 :]:
-            ET.SubElement(
-                contact,
-                "exclude",
-                {"body1": first_body, "body2": second_body},
-            )
-
-    actuator = root.find("actuator")
-    if actuator is None:
-        actuator = ET.SubElement(root, "actuator")
+    # Show the measured end-effector pose in exactly the same coordinate-frame
+    # form as the command target.  These sites are attached to eef_link, so
+    # MuJoCo updates them automatically with the robot state and they remain
+    # purely visual (no added mass or collision geometry).
+    eef_frame = worldbody.find(".//body[@name='eef_link']")
+    if eef_frame is None:
+        raise ValueError("eef_link body is missing from MJCF")
     ET.SubElement(
-        actuator,
-        "position",
+        eef_frame,
+        "site",
         {
-            "name": SIM_GRIPPER_ACTUATOR_NAME,
-            "joint": SIM_GRIPPER_JOINT_NAMES[0],
-            "kp": "20",
-            "ctrllimited": "true",
-            "ctrlrange": f"0 {SIM_GRIPPER_MAX_ANGLE}",
-            "forcelimited": "true",
-            "forcerange": "-10 10",
+            "name": "current_eef",
+            "type": "sphere",
+            "size": "0.012",
+            "rgba": "1 1 1 0.9",
+            "group": "0",
         },
     )
+    for name, endpoint, color in (
+        ("current_eef_x", "0.16 0 0", "1 0.12 0.05 1"),
+        ("current_eef_y", "0 0.16 0", "0.1 0.9 0.2 1"),
+        ("current_eef_z", "0 0 0.16", "0.1 0.35 1 1"),
+    ):
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": name,
+                "type": "capsule",
+                "fromto": f"0 0 0 {endpoint}",
+                "size": "0.007",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": f"{name}_tip",
+                "type": "sphere",
+                "pos": endpoint,
+                "size": "0.014",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+
+    # The current assembly.urdf defines the UMI gripper as fixed link6
+    # geometry.  Do not recreate the obsolete six-DoF DAS gripper at runtime,
+    # otherwise the simulated robot would no longer match eef_link training.
 
     xml = ET.tostring(root, encoding="unicode")
     return mujoco.MjModel.from_xml_string(xml)
@@ -1158,22 +1119,10 @@ class Sim2Sim:
         )
         if np.any(self.motor_ids < 0):
             raise ValueError("One or more joint motors are missing from the MJCF")
-        self.gripper_actuator_id = mujoco.mj_name2id(
-            model,
-            mujoco.mjtObj.mjOBJ_ACTUATOR,
-            SIM_GRIPPER_ACTUATOR_NAME,
-        )
-        self.gripper_joint_qpos_adr = np.array(
-            [model.joint(name).qposadr[0] for name in SIM_GRIPPER_JOINT_NAMES],
-            dtype=int,
-        )
-        if self.gripper_actuator_id < 0:
-            raise ValueError("Simulation gripper actuators are missing from the MJCF")
         self.gripper_trigger = 0.0
-        self.gripper_target = 0.0
 
         self.base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
-        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "link6")
+        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "eef_link")
         self.target_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "command_target")
         target_frame_body_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_BODY, "command_target_frame"
@@ -1339,13 +1288,12 @@ class Sim2Sim:
         self._update_target_marker()
 
     def set_gripper_trigger(self, trigger: float) -> None:
-        """Map the Quest front trigger [0, 1] to the gripper driver angle."""
+        """Keep Quest input compatibility; the current URDF gripper is fixed."""
         self.gripper_trigger = float(np.clip(trigger, 0.0, 1.0))
-        self.gripper_target = self.gripper_trigger * SIM_GRIPPER_MAX_ANGLE
 
     def gripper_position(self) -> float:
-        """Return the simulated driver-joint angle in radians."""
-        return float(self.data.qpos[self.gripper_joint_qpos_adr[0]])
+        """The current URDF has no gripper DoF."""
+        return 0.0
 
     def infer(self) -> None:
         contact_obs = self.contact_observation()
@@ -1389,7 +1337,6 @@ class Sim2Sim:
 
         self.data.ctrl[:] = 0.0
         self.data.ctrl[self.motor_ids] = torque
-        self.data.ctrl[self.gripper_actuator_id] = self.gripper_target
         self.last_torque = torque
 
     def step(self, physics_step: int) -> None:
@@ -1441,7 +1388,7 @@ def run(args: argparse.Namespace) -> None:
     print(f"[sim2sim] ONNX: {model_dir.expanduser().resolve()}")
     print("[quest] Right Grip: XYZ position control")
     print("[quest] Left Grip: roll/pitch/yaw orientation control")
-    print("[quest] Right front Trigger: 0=open, 1=closed (analog gripper control)")
+    print("[quest] Right front Trigger is ignored: the current URDF gripper is fixed.")
     print(
         "[quest] OpenVR -> base: "
         "dx=-dVR_z (forward), dy=-dVR_x (left), dz=dVR_y (up)"
@@ -1636,8 +1583,7 @@ def run(args: argparse.Namespace) -> None:
                     f"|action|max={np.max(np.abs(simulation.last_action)):6.3f}  "
                     f"target_xyz={target_position_base.round(3).tolist()}  "
                     f"target_rpy={target_rpy.round(3).tolist()}  "
-                    f"trigger={simulation.gripper_trigger:.2f}  "
-                    f"gripper_angle={simulation.gripper_position():.3f}rad"
+                    "gripper=fixed"
                 )
                 if args.leg_debug:
                     joint_position, _ = simulation.joint_state()

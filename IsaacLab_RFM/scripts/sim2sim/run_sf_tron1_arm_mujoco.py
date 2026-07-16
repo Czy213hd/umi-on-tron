@@ -44,25 +44,29 @@ DEPLOYED_MODEL_DIR = (
     / "tron1_ws/src/tron1-rl-deploy-arm/src/robot_controllers/config/"
     "pointfoot/SF_TRON1A_ARX5ARM/policy"
 )
+WBC_LOG_ROOT = Path(os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs"))
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
-TIP_OFFSET_POS = np.array([0.08657, -0.0249, -0.00024366], dtype=np.float64)
-TIP_OFFSET_RPY = (-math.pi * 0.5, 0.0, -math.pi * 0.5)
+# The trained task tracks the URDF's eef_link directly.  It is already the
+# UMI gripper-base frame, so the former link6 -> tip conversion must not run.
+TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
+TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
 
-# This order must match PointfootCfg.init_state.joint_names and the training
-# articulation order. It is intentionally not MuJoCo's internal joint order.
+# This is the Isaac Lab articulation/action order measured at runtime for the
+# training asset.  MuJoCo state and actuator addresses are explicitly gathered
+# by name below, so they must be exposed to the policy in this exact order.
 JOINT_NAMES = (
-    "J1",
     "abad_L_Joint",
     "abad_R_Joint",
-    "J2",
     "hip_L_Joint",
     "hip_R_Joint",
-    "J3",
     "knee_L_Joint",
     "knee_R_Joint",
-    "J4",
+    "J1",
     "ankle_L_Joint",
     "ankle_R_Joint",
+    "J2",
+    "J3",
+    "J4",
     "J5",
     "J6",
 )
@@ -80,21 +84,21 @@ ARM_NAMES = ("J1", "J2", "J3", "J4", "J5", "J6")
 LEG_IDS = np.array([JOINT_NAMES.index(name) for name in LEG_NAMES], dtype=int)
 ARM_IDS = np.array([JOINT_NAMES.index(name) for name in ARM_NAMES], dtype=int)
 DEFAULT_JOINT_POS = np.array(
-    [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
 )
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
-    [18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 4.0, 45.0, 45.0, 4.0, 4.0],
+    [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 18.0, 45.0, 45.0, 18.0, 18.0, 4.0, 4.0, 4.0],
     dtype=np.float64,
 )
 KD = np.array(
-    [1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 0.5, 0.8, 0.8, 0.5, 0.5],
+    [1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.0, 0.8, 0.8, 1.0, 1.0, 0.5, 0.5, 0.5],
     dtype=np.float64,
 )
 TORQUE_LIMIT = np.array(
-    [18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 3.0, 40.0, 40.0, 3.0, 3.0],
+    [80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 18.0, 40.0, 40.0, 18.0, 18.0, 3.0, 3.0, 3.0],
     dtype=np.float64,
 )
 
@@ -108,20 +112,11 @@ HISTORY_LENGTH = 10
 OBS_DIM = 65
 CONTACT_OBS_DIM = 55
 ACTION_DIM = 14
-SIM_GRIPPER_MAX_ANGLE = 0.925
-SIM_GRIPPER_JOINT_NAMES = (
-    "assembly_DAS_Controller_V3_with_flange_joint1",
-    "assembly_DAS_Controller_V3_with_flange_joint2",
-    "assembly_DAS_Controller_V3_with_flange_joint3",
-    "assembly_DAS_Controller_V3_with_flange_joint4",
-    "assembly_DAS_Controller_V3_with_flange_joint5",
-    "assembly_DAS_Controller_V3_with_flange_joint6",
-)
-SIM_GRIPPER_JOINT_MULTIPLIERS = np.array(
-    [1.0, -1.0, -1.0, 1.0, 1.0, -1.0],
-    dtype=np.float64,
-)
-SIM_GRIPPER_ACTUATOR_NAME = "sim_gripper_position"
+# MuJoCo's friction tuple is (sliding, torsional, rolling); it does not expose
+# separate static and dynamic coefficients.  Use the IsaacLab terrain's nominal
+# coefficient for deterministic sim2sim evaluation.  Training randomization is
+# configured independently in the IsaacLab environment and is not changed here.
+MUJOCO_CONTACT_FRICTION = "1.0 0.005 0.0001"
 
 
 def format_named(names: tuple[str, ...], values: np.ndarray) -> str:
@@ -154,7 +149,7 @@ def parse_args() -> argparse.Namespace:
         "--model-dir",
         type=Path,
         help="Directory containing actor.onnx, contactNet.onnx and gru.onnx. "
-        "Default: newest exported training run.",
+        "Default: newest exported run under WBC_LOG_ROOT, then the legacy local log.",
     )
     parser.add_argument(
         "--duration",
@@ -185,6 +180,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--keyboard-step",
+        "--keyboard",
+        dest="keyboard_step",
         type=float,
         default=0.02,
         help="Target-position increment per key press in metres (default: 0.02).",
@@ -244,14 +241,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def newest_exported_model_dir() -> Path:
-    log_root = ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm"
+    # Training now writes to WBC_LOG_ROOT. Keep the in-repository location as
+    # a fallback so old local runs remain usable.
+    log_roots = (
+        WBC_LOG_ROOT,
+        ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm",
+    )
     candidates = [
         path
+        for log_root in log_roots
         for path in log_root.glob("*/exported")
         if all((path / name).is_file() for name in ("actor.onnx", "contactNet.onnx", "gru.onnx"))
     ]
     if candidates:
-        return max(candidates, key=lambda path: path.parent.name)
+        return max(candidates, key=lambda path: (path.parent.stat().st_mtime_ns, path.parent.name))
     return DEPLOYED_MODEL_DIR
 
 
@@ -503,7 +506,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
                 "type": "plane",
                 "size": "0 0 0.1",
                 "material": "sim2sim_checker_material",
-                "friction": "0.8 0.6 0.001",
+                "friction": MUJOCO_CONTACT_FRICTION,
                 "condim": "3",
                 "solref": "0.005 1",
                 "solimp": "0.95 0.99 0.001",
@@ -521,7 +524,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
     # A fixed doorway with a dynamic door panel. The robot starts at the
     # origin facing +X, so the door plane is placed in front of it at x=0.75 m.
     contact_parameters = {
-        "friction": "0.8 0.1 0.001",
+        "friction": MUJOCO_CONTACT_FRICTION,
         "condim": "3",
         "solref": "0.005 1",
         "solimp": "0.95 0.99 0.001",
@@ -665,91 +668,55 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
         )
     worldbody.insert(2, target_frame)
 
-    # The checked-in MJCF locks the DAS gripper. Restore the six revolute
-    # joints; joint 1 is driven and joints 2-6 follow its mimic ratios.
-    gripper_joint_specs = (
-        ("assembly_DAS_Controller_V3_with_flange_link1", SIM_GRIPPER_JOINT_NAMES[0], 0.0, 0.925),
-        ("assembly_DAS_Controller_V3_with_flange_link2", SIM_GRIPPER_JOINT_NAMES[1], -0.925, 0.0),
-        ("assembly_DAS_Controller_V3_with_flange_link3", SIM_GRIPPER_JOINT_NAMES[2], -0.925, 0.0),
-        ("assembly_DAS_Controller_V3_with_flange_link4", SIM_GRIPPER_JOINT_NAMES[3], 0.0, 0.925),
-        ("assembly_DAS_Controller_V3_with_flange_link5", SIM_GRIPPER_JOINT_NAMES[4], 0.0, 0.925),
-        ("assembly_DAS_Controller_V3_with_flange_link6", SIM_GRIPPER_JOINT_NAMES[5], -0.925, 0.0),
-    )
-    for body_name, joint_name, lower, upper in gripper_joint_specs:
-        body = worldbody.find(f".//body[@name='{body_name}']")
-        if body is None:
-            raise ValueError(f"Gripper body is missing from MJCF: {body_name}")
-        joint = ET.Element(
-            "joint",
-            {
-                "name": joint_name,
-                "type": "hinge",
-                "axis": "0 0 -1",
-                "limited": "true",
-                "range": f"{lower} {upper}",
-                "damping": "0.1",
-                "armature": "0.001",
-            },
-        )
-        body.insert(1 if body.find("inertial") is not None else 0, joint)
-
-    equality = root.find("equality")
-    if equality is None:
-        equality = ET.SubElement(root, "equality")
-    for joint_name, multiplier in zip(
-        SIM_GRIPPER_JOINT_NAMES[1:],
-        SIM_GRIPPER_JOINT_MULTIPLIERS[1:],
-    ):
-        ET.SubElement(
-            equality,
-            "joint",
-            {
-                "name": f"{joint_name}_mimic",
-                "joint1": joint_name,
-                "joint2": SIM_GRIPPER_JOINT_NAMES[0],
-                "polycoef": f"0 {multiplier} 0 0 0",
-                "solref": "0.002 1",
-            },
-        )
-
-    # Ignore only internal gripper contacts; the fingers can still collide
-    # with and hold objects in the scene.
-    contact = root.find("contact")
-    if contact is None:
-        contact = ET.SubElement(root, "contact")
-    gripper_bodies = (
-        "assembly_DAS_Controller_V3_with_flange",
-        "assembly_DAS_Controller_V3_with_flange_link1",
-        "assembly_DAS_Controller_V3_with_flange_link2",
-        "assembly_DAS_Controller_V3_with_flange_link3",
-        "assembly_DAS_Controller_V3_with_flange_link4",
-        "assembly_DAS_Controller_V3_with_flange_link5",
-        "assembly_DAS_Controller_V3_with_flange_link6",
-    )
-    for first_index, first_body in enumerate(gripper_bodies):
-        for second_body in gripper_bodies[first_index + 1 :]:
-            ET.SubElement(
-                contact,
-                "exclude",
-                {"body1": first_body, "body2": second_body},
-            )
-
-    actuator = root.find("actuator")
-    if actuator is None:
-        actuator = ET.SubElement(root, "actuator")
+    # Render the measured eef_link pose with the same RGB coordinate frame as
+    # the command target. Sites are visual only and move with eef_link.
+    eef_frame = worldbody.find(".//body[@name='eef_link']")
+    if eef_frame is None:
+        raise ValueError("eef_link body is missing from MJCF")
     ET.SubElement(
-        actuator,
-        "position",
+        eef_frame,
+        "site",
         {
-            "name": SIM_GRIPPER_ACTUATOR_NAME,
-            "joint": SIM_GRIPPER_JOINT_NAMES[0],
-            "kp": "20",
-            "ctrllimited": "true",
-            "ctrlrange": f"0 {SIM_GRIPPER_MAX_ANGLE}",
-            "forcelimited": "true",
-            "forcerange": "-10 10",
+            "name": "current_eef",
+            "type": "sphere",
+            "size": "0.012",
+            "rgba": "1 1 1 0.9",
+            "group": "0",
         },
     )
+    for name, endpoint, color in (
+        ("current_eef_x", "0.16 0 0", "1 0.12 0.05 1"),
+        ("current_eef_y", "0 0.16 0", "0.1 0.9 0.2 1"),
+        ("current_eef_z", "0 0 0.16", "0.1 0.35 1 1"),
+    ):
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": name,
+                "type": "capsule",
+                "fromto": f"0 0 0 {endpoint}",
+                "size": "0.007",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": f"{name}_tip",
+                "type": "sphere",
+                "pos": endpoint,
+                "size": "0.014",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+
+    # assembly.urdf models the UMI gripper as fixed geometry attached to
+    # link6.  Do not inject the obsolete six-DoF DAS gripper at runtime: it
+    # would no longer match the trained robot or its eef_link frame.
 
     xml = ET.tostring(root, encoding="unicode")
     return mujoco.MjModel.from_xml_string(xml)
@@ -833,7 +800,7 @@ class ThreeOnnxPolicy:
 
 
 class TerminalKeyboardController:
-    """Read target and gripper commands directly from the launching terminal."""
+    """Read target commands directly from the launching terminal."""
 
     KEY_DELTAS = {
         "W": np.array([1.0, 0.0, 0.0]),
@@ -861,7 +828,7 @@ class TerminalKeyboardController:
     def start(self) -> bool:
         """Enter cbreak mode so each terminal key is available immediately."""
         if not sys.stdin.isatty():
-            print("[keyboard] stdin 不是终端，已禁用实时键盘控制。")
+            print("[keyboard] stdin 不是终端；终端监听已禁用，MuJoCo 窗口键盘控制仍可用。")
             return False
         self._fd = sys.stdin.fileno()
         self._saved_terminal_settings = termios.tcgetattr(self._fd)
@@ -886,19 +853,28 @@ class TerminalKeyboardController:
                 break
             if not raw_key:
                 break
-            key = raw_key.decode(errors="ignore").upper()
-            with self._lock:
-                direction = self.KEY_DELTAS.get(key)
-                if direction is not None:
-                    self._pending_delta += direction * self.step
-                elif key == "P":
-                    self._print_requested = True
-                elif key == "O":
-                    self._gripper_command = 0.0
-                elif key == "C":
-                    self._gripper_command = 1.0
-                elif key == "Q":
-                    self._quit_requested = True
+            self._queue_key(raw_key.decode(errors="ignore"))
+
+    def _queue_key(self, key: str) -> None:
+        """Queue one target-control key from either terminal or viewer."""
+        key = key.upper()
+        with self._lock:
+            direction = self.KEY_DELTAS.get(key)
+            if direction is not None:
+                self._pending_delta += direction * self.step
+            elif key == "P":
+                self._print_requested = True
+            elif key == "O":
+                self._gripper_command = 0.0
+            elif key == "C":
+                self._gripper_command = 1.0
+            elif key == "Q":
+                self._quit_requested = True
+
+    def viewer_key_callback(self, keycode: int) -> None:
+        """Receive GLFW key codes while the MuJoCo viewer has focus."""
+        if 0 <= keycode <= 0x10FFFF:
+            self._queue_key(chr(keycode))
 
     def consume(self) -> tuple[np.ndarray, bool, float | None, bool]:
         with self._lock:
@@ -956,22 +932,10 @@ class Sim2Sim:
         )
         if np.any(self.motor_ids < 0):
             raise ValueError("One or more joint motors are missing from the MJCF")
-        self.gripper_actuator_id = mujoco.mj_name2id(
-            model,
-            mujoco.mjtObj.mjOBJ_ACTUATOR,
-            SIM_GRIPPER_ACTUATOR_NAME,
-        )
-        self.gripper_joint_qpos_adr = np.array(
-            [model.joint(name).qposadr[0] for name in SIM_GRIPPER_JOINT_NAMES],
-            dtype=int,
-        )
-        if self.gripper_actuator_id < 0:
-            raise ValueError("Simulation gripper actuator is missing from the MJCF")
         self.gripper_command = 0.0
-        self.gripper_target = 0.0
 
         self.base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
-        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "link6")
+        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "eef_link")
         self.target_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "command_target")
         target_frame_body_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_BODY, "command_target_frame"
@@ -1137,13 +1101,12 @@ class Sim2Sim:
         self._update_target_marker()
 
     def set_gripper_command(self, command: float) -> None:
-        """Map 0=open and 1=closed to the gripper driver angle."""
+        """Keep keyboard compatibility; the URDF gripper itself is fixed."""
         self.gripper_command = float(np.clip(command, 0.0, 1.0))
-        self.gripper_target = self.gripper_command * SIM_GRIPPER_MAX_ANGLE
 
     def gripper_position(self) -> float:
-        """Return the simulated driver-joint angle in radians."""
-        return float(self.data.qpos[self.gripper_joint_qpos_adr[0]])
+        """The current URDF has no gripper DoF."""
+        return 0.0
 
     def infer(self) -> None:
         contact_obs = self.contact_observation()
@@ -1187,7 +1150,6 @@ class Sim2Sim:
 
         self.data.ctrl[:] = 0.0
         self.data.ctrl[self.motor_ids] = torque
-        self.data.ctrl[self.gripper_actuator_id] = self.gripper_target
         self.last_torque = torque
 
     def step(self, physics_step: int) -> None:
@@ -1313,8 +1275,7 @@ def run(args: argparse.Namespace) -> None:
                 break
             if gripper_command is not None:
                 simulation.set_gripper_command(gripper_command)
-                state = "闭合/夹取" if gripper_command > 0.5 else "张开"
-                print(f"[keyboard] 夹爪{state}")
+                print("[keyboard] 当前 URDF 将夹爪建模为固定几何，O/C 不改变模型。")
             if np.any(target_delta):
                 if trajectory is not None:
                     trajectory.translate_offset(target_delta)
@@ -1361,7 +1322,7 @@ def run(args: argparse.Namespace) -> None:
                     f"base_z={base_z:6.3f}  "
                     f"EE误差={pos_error:6.3f}m/{rot_error:6.3f}rad  "
                     f"|action|max={np.max(np.abs(simulation.last_action)):6.3f}  "
-                    f"gripper={simulation.gripper_position():5.3f}rad"
+                    "gripper=fixed"
                 )
                 if args.leg_debug:
                     joint_position, _ = simulation.joint_state()
@@ -1391,8 +1352,8 @@ def run(args: argparse.Namespace) -> None:
                 viewer_sync_count = 0
 
     print(
-        "[keyboard] 请保持终端窗口焦点：W/S = ±X，A/D = ±Y，R/F = ±Z，"
-        f"O = 张开夹爪，C = 闭合夹取，P = 显示坐标，Q = 退出；"
+        "[keyboard] MuJoCo 窗口或终端均可控制：W/S = ±X，A/D = ±Y，R/F = ±Z，"
+        f"P = 显示坐标，Q = 退出；"
         f"步长 {args.keyboard_step:g} m"
     )
     keyboard.start()
@@ -1405,7 +1366,11 @@ def run(args: argparse.Namespace) -> None:
             else:
                 import mujoco.viewer
 
-                with mujoco.viewer.launch_passive(model, simulation.data) as viewer_handle:
+                with mujoco.viewer.launch_passive(
+                    model,
+                    simulation.data,
+                    key_callback=keyboard.viewer_key_callback,
+                ) as viewer_handle:
                     configure_viewer(
                         viewer_handle,
                         simulation.base_body_id,
