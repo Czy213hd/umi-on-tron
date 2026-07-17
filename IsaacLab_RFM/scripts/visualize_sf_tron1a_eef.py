@@ -7,9 +7,9 @@ Run from the ``IsaacLab_RFM`` directory:
 The URDF conversion is forced on every launch.  This is intentional: Isaac
 Lab's lazy URDF conversion does not detect changes to referenced mesh files.
 
-The Isaac Sim default timeline ends after 100 frames.  This viewer makes the
-timeline loop, so it stays open for inspection instead of stopping after about
-1.7 seconds.
+This is a static model inspector.  It initializes one physics frame, then
+pauses physics and only renders, so Isaac Sim's default 100-frame timeline
+cannot close the viewer during inspection.
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -28,6 +28,15 @@ parser.add_argument(
     default=0.15,
     help="Length scale of the RGB coordinate axes in metres (default: 0.15).",
 )
+# This standalone inspector must survive a timeline STOP event.  Isaac Lab's
+# default experience enables fast shutdown for batch jobs, which closes the GUI
+# as soon as Kit receives that event.
+parser.add_argument(
+    "--fast_shutdown",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Keep Isaac Sim open after a timeline stop (default: false).",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -38,6 +47,7 @@ simulation_app = app_launcher.app
 
 import isaaclab.sim as sim_utils
 import omni.timeline
+import omni.usd
 from isaaclab.assets import Articulation
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import FRAME_MARKER_CFG
@@ -62,15 +72,30 @@ def detach_stop_shutdown_callback(sim: SimulationContext) -> None:
 
 
 def configure_inspection_timeline() -> None:
-    """Prevent Isaac Sim's short default timeline from stopping this viewer."""
+    """Prepare a long timeline before the single initialization step.
+
+    Both the Timeline interface and the USD Stage metadata must be changed.
+    Isaac Sim can otherwise still stop at the stage's default ``endTimeCode``
+    of 100 even when ``timeline.get_end_time()`` reports a larger value.
+    """
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        raise RuntimeError("Cannot configure the inspection timeline without an open USD stage.")
+
+    stage.SetStartTimeCode(0.0)
+    stage.SetEndTimeCode(1.0e6)
     timeline = omni.timeline.get_timeline_interface()
+    timeline.set_start_time(0.0)
     timeline.set_end_time(1.0e6)
     timeline.set_looping(True)
+    timeline.set_current_time(0.0)
     # Timeline edits are queued until commit(), so make them live immediately.
     timeline.commit()
+    timeline.play()
     print(
         "[INFO] Timeline configured: "
-        f"end={timeline.get_end_time():g}s, looping={timeline.is_looping()}."
+        f"timeline_end={timeline.get_end_time():g}s, stage_end={stage.GetEndTimeCode():g}, "
+        f"looping={timeline.is_looping()}."
     )
 
 
@@ -140,9 +165,6 @@ def main():
 
     robot, eef_marker = design_scene()
     sim.reset()
-    # Configure after reset because reset may restore the stage's default
-    # 100-frame Timeline range.
-    configure_inspection_timeline()
 
     eef_ids, eef_names = robot.find_bodies("eef_link")
     if eef_names != ["eef_link"]:
@@ -156,7 +178,14 @@ def main():
     robot.write_root_velocity_to_sim(root_state[:, 7:])
     robot.write_joint_state_to_sim(robot.data.default_joint_pos, robot.data.default_joint_vel)
     robot.reset()
+    configure_inspection_timeline()
+    # Take one physics step to apply the default joint state and populate the
+    # imported link poses.  The viewer is static afterwards: repeatedly
+    # stepping physics would eventually hit the standalone timeline stop path.
     sim.play()
+    sim.step()
+    robot.update(sim.get_physics_dt())
+    sim.pause()
 
     print(f"[INFO] Visualizing imported '{eef_names[0]}' (body index {eef_id}).")
     print("[INFO] RGB axes are the eef_link frame defined above, not an EE command/target frame.")
@@ -165,27 +194,26 @@ def main():
         "[INFO] App state before loop: "
         f"kit_running={simulation_app.app.is_running()}, "
         f"stage_ready={simulation_app.context.get_stage() is not None}, "
-        f"timeline_playing={not sim.is_stopped()}."
+        f"timeline_playing={not sim.is_stopped()} (physics is paused for static inspection)."
     )
 
-    sim_dt = sim.get_physics_dt()
     step_count = 0
     while simulation_app.is_running():
-        robot.write_data_to_sim()
-        sim.step()
-        robot.update(sim_dt)
-
-        # body_link_pose_w is the URDF link frame, not the link COM frame.
-        eef_pose_w = robot.data.body_link_pose_w[:, eef_id]
+        # These are the URDF link frame, not the link COM frame.  Isaac Lab
+        # exposes position and quaternion separately in this release.
+        eef_pos_w = robot.data.body_link_pos_w[:, eef_id]
+        eef_quat_w = robot.data.body_link_quat_w[:, eef_id]
         eef_marker.visualize(
-            translations=eef_pose_w[:, :3],
-            orientations=eef_pose_w[:, 3:7],  # Isaac Lab uses wxyz quaternions.
+            translations=eef_pos_w,
+            orientations=eef_quat_w,  # Isaac Lab uses wxyz quaternions.
         )
 
         if step_count % 300 == 0:
-            position = eef_pose_w[0, :3].detach().cpu().tolist()
-            quaternion_wxyz = eef_pose_w[0, 3:7].detach().cpu().tolist()
+            position = eef_pos_w[0].detach().cpu().tolist()
+            quaternion_wxyz = eef_quat_w[0].detach().cpu().tolist()
             print(f"[INFO] eef_link world pose: pos={position}, quat_wxyz={quaternion_wxyz}")
+        # Refresh the viewport and UI without advancing the timeline.
+        sim.render()
         step_count += 1
 
 

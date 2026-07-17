@@ -105,6 +105,14 @@ class CommandsCfg:
             yaw=(-3.2, 3.2),
         ),
         se3_decrease_vel_range=(0.5, 1.4),
+        # Precision diagnostics only affect logging; they do not change observations or rewards.
+        precision_metrics_enabled=True,
+        precision_window_s=1.0,
+        precision_trend_edge_s=0.2,
+        precision_hold_s=0.5,
+        precision_position_threshold=0.05,
+        precision_orientation_threshold=math.radians(5.0),
+        precision_mani_scale_threshold=0.1,
         debug_vis=True,
     )
 
@@ -430,8 +438,8 @@ class RewardsCfg:
     #     params={"pos_sigma": 0.6, "orn_sigma": 2.0, "command_name": "EE_pose"},
     # )
     # EE Tracking
-    track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=2.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)}) #2
-    track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=3.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})
+    track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=3.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})            #2.0 by Edwin
+    track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=4.5, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})      #3.0 by Edwin
     track_EE_pb = RewTerm(func=mdp.track_EE_pb, weight=20.0)
     track_EE_reference_exp = RewTerm(func=mdp.track_EE_reference_exp, weight=5.0, params={"std": math.sqrt(0.5), "init_value": 0.98})
 
