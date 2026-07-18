@@ -549,6 +549,68 @@ def contact_ankle_deviation_l2(
     return torch.sum(penalty, dim=1)
 
 
+def foot_flat_l2(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    threshold: float = 5.0,
+    command_name: str = "EE_pose",
+) -> torch.Tensor:
+    """近目标接触脚平整惩罚，抑制脚尖/脚跟承重。
+
+    该项沿用学长版本的几何定义：将每只脚 link 的局部 z 轴旋转到世界系，
+    用其 xy 分量平方和（等价于脚面倾角的 ``sin(theta)^2``）衡量不平整程度。
+    相比原版本，本实现增加两个门控：
+
+    1. 仅惩罚当前接触力超过 ``threshold`` 的脚，不约束摆动脚；
+    2. 乘实时 ``_standing_gate``，只在 EE 接近目标时重点要求平脚站稳。
+
+    ``asset_cfg`` 与 ``sensor_cfg`` 必须按相同顺序各解析出左右两只 ankle link。
+    函数同时缓存左右脚倾角、接触状态和 standing gate，供 W&B 精度日志聚合；
+    这些诊断缓存不参与 reward 计算。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    foot_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+    current_forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids]
+    if foot_quat_w.shape[1] != 2 or current_forces.shape[1] != 2:
+        raise ValueError(
+            "foot_flat_l2 expects exactly two foot bodies in matching left/right order; "
+            f"got {foot_quat_w.shape[1]} asset bodies and {current_forces.shape[1]} sensor bodies."
+        )
+
+    local_z = torch.zeros(
+        foot_quat_w.shape[0],
+        foot_quat_w.shape[1],
+        3,
+        device=asset.device,
+        dtype=foot_quat_w.dtype,
+    )
+    local_z[..., 2] = 1.0
+    foot_z_w = math_utils.quat_apply(
+        foot_quat_w.reshape(-1, 4), local_z.reshape(-1, 3)
+    ).reshape_as(local_z)
+
+    per_foot_flatness_error = torch.sum(torch.square(foot_z_w[..., :2]), dim=-1)
+    contact_mask = torch.norm(current_forces, dim=-1) > threshold
+    standing_gate = _standing_gate(env, command_name=command_name)
+
+    # 供 commands.py 在 episode reset 时做精确的加权聚合。显式 detach，避免
+    # 诊断缓存持有无用的计算图；reward 本身仍使用上面的原始张量。
+    foot_tilt_rad = torch.acos(torch.clamp(foot_z_w[..., 2], min=-1.0, max=1.0))
+    env._foot_flat_diagnostics = {  # type: ignore[attr-defined]
+        "tilt_rad": foot_tilt_rad.detach(),
+        "contact_mask": contact_mask.detach(),
+        "standing_gate": standing_gate.detach(),
+    }
+
+    return (
+        torch.sum(per_foot_flatness_error * contact_mask.float(), dim=1)
+        * standing_gate
+    )
+
+
 def _walking_gate(
     env: ManagerBasedRLEnv,
     command_name: str = "EE_pose",

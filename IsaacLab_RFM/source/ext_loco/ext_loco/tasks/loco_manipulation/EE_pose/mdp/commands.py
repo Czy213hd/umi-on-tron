@@ -154,6 +154,12 @@ class UniformWorldPoseCommand(UniformPoseCommand):
             "final_orientation_drop_sum",
             "mani_position_sum",
             "mani_orientation_sum",
+            "foot_standing_weight_sum",
+            "foot_both_contact_weight_sum",
+            "foot_left_contact_weight_sum",
+            "foot_right_contact_weight_sum",
+            "foot_left_tilt_weighted_sum",
+            "foot_right_tilt_weighted_sum",
         ):
             setattr(self, f"_precision_episode_{name}", torch.zeros(self.num_envs, device=self.device))
 
@@ -200,6 +206,7 @@ class UniformWorldPoseCommand(UniformPoseCommand):
         self._precision_episode_mani_position_sum += safe_position_error * mani_mask
         self._precision_episode_mani_orientation_sum += safe_orientation_error * mani_mask
         self._precision_episode_mani_count += mani_mask
+        self._record_foot_flat_diagnostics(finite_mask)
 
         inside_tolerance = (position_error <= self._precision_position_threshold) & (
             orientation_error <= self._precision_orientation_threshold
@@ -210,6 +217,52 @@ class UniformWorldPoseCommand(UniformPoseCommand):
             torch.zeros_like(self._precision_hold_count),
         )
         self._precision_command_success |= self._precision_hold_count >= self._precision_hold_steps
+
+    def _record_foot_flat_diagnostics(self, finite_tracking_mask: torch.Tensor):
+        """Accumulate standing-gate-weighted foot tilt/contact diagnostics from the reward cache."""
+        diagnostics = getattr(self._env, "_foot_flat_diagnostics", None)
+        if not isinstance(diagnostics, dict):
+            return
+
+        tilt_rad = diagnostics.get("tilt_rad")
+        contact_mask = diagnostics.get("contact_mask")
+        standing_gate = diagnostics.get("standing_gate")
+        if not all(isinstance(value, torch.Tensor) for value in (tilt_rad, contact_mask, standing_gate)):
+            return
+        if tilt_rad.shape != (self.num_envs, 2) or contact_mask.shape != (self.num_envs, 2):
+            return
+        if standing_gate.shape != (self.num_envs,):
+            return
+
+        valid_gate = finite_tracking_mask & torch.isfinite(standing_gate)
+        standing_weight = torch.where(
+            valid_gate,
+            torch.clamp(standing_gate, min=0.0, max=1.0),
+            torch.zeros_like(standing_gate),
+        )
+        self._precision_episode_foot_standing_weight_sum += standing_weight
+        self._precision_episode_foot_both_contact_weight_sum += (
+            standing_weight * torch.all(contact_mask, dim=1)
+        )
+
+        for foot_index, side in enumerate(("left", "right")):
+            valid_tilt = torch.isfinite(tilt_rad[:, foot_index])
+            contact_weight = (
+                standing_weight
+                * contact_mask[:, foot_index]
+                * valid_tilt
+            )
+            safe_tilt = torch.where(
+                valid_tilt,
+                tilt_rad[:, foot_index],
+                torch.zeros_like(tilt_rad[:, foot_index]),
+            )
+            getattr(self, f"_precision_episode_foot_{side}_contact_weight_sum").add_(
+                contact_weight
+            )
+            getattr(self, f"_precision_episode_foot_{side}_tilt_weighted_sum").add_(
+                safe_tilt * contact_weight
+            )
 
     def _finalize_precision_command(self, env_ids: Sequence[int] | torch.Tensor):
         """Aggregate the active command before its target changes, then clear command-local state."""
@@ -273,6 +326,9 @@ class UniformWorldPoseCommand(UniformPoseCommand):
         mani_count = self._precision_episode_mani_count[env_ids]
         step_count = self._precision_episode_step_count[env_ids]
         finite_step_count = self._precision_episode_finite_step_count[env_ids]
+        standing_weight = self._precision_episode_foot_standing_weight_sum[env_ids]
+        left_contact_weight = self._precision_episode_foot_left_contact_weight_sum[env_ids]
+        right_contact_weight = self._precision_episode_foot_right_contact_weight_sum[env_ids]
 
         weighted_metrics = {
             "precision/final_1s_position_error_mean_m": (
@@ -314,6 +370,35 @@ class UniformWorldPoseCommand(UniformPoseCommand):
                 self._precision_episode_success_count[env_ids],
                 command_count,
             ),
+            "precision/feet/near_target_standing_gate_mean": (
+                standing_weight,
+                finite_step_count,
+            ),
+            "precision/feet/near_target_both_contact_fraction": (
+                self._precision_episode_foot_both_contact_weight_sum[env_ids],
+                standing_weight,
+            ),
+            "precision/feet/near_target_left_contact_fraction": (
+                left_contact_weight,
+                standing_weight,
+            ),
+            "precision/feet/near_target_right_contact_fraction": (
+                right_contact_weight,
+                standing_weight,
+            ),
+            "precision/feet/near_target_contact_foot_tilt_mean_rad": (
+                self._precision_episode_foot_left_tilt_weighted_sum[env_ids]
+                + self._precision_episode_foot_right_tilt_weighted_sum[env_ids],
+                left_contact_weight + right_contact_weight,
+            ),
+            "precision/feet/near_target_left_contact_foot_tilt_mean_rad": (
+                self._precision_episode_foot_left_tilt_weighted_sum[env_ids],
+                left_contact_weight,
+            ),
+            "precision/feet/near_target_right_contact_foot_tilt_mean_rad": (
+                self._precision_episode_foot_right_tilt_weighted_sum[env_ids],
+                right_contact_weight,
+            ),
         }
 
         extras = {}
@@ -339,6 +424,12 @@ class UniformWorldPoseCommand(UniformPoseCommand):
             "final_orientation_drop_sum",
             "mani_position_sum",
             "mani_orientation_sum",
+            "foot_standing_weight_sum",
+            "foot_both_contact_weight_sum",
+            "foot_left_contact_weight_sum",
+            "foot_right_contact_weight_sum",
+            "foot_left_tilt_weighted_sum",
+            "foot_right_tilt_weighted_sum",
         ):
             getattr(self, f"_precision_episode_{name}")[env_ids] = 0
 

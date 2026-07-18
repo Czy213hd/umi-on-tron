@@ -81,7 +81,7 @@
             <geom name="knee_L_Link_collision_1" class="collision" pos="0.078 0 -0.12" quat="0.962425197628 0 -0.271546936956 0" type="cylinder" size="0.02 0.13" />
             <body name="ankle_L_Link" pos="0.15 0 -0.25981">
               <inertial mass="0.62" pos="0.01074 -0.00061 -0.03314" fullinertia="0.0005255 0.001812 0.0019738 -0.0000035 -0.0000514 0.0000065" />
-              <joint name="ankle_L_Joint" type="hinge" axis="0 -1 0" limited="true" range="-1.1519173 1.5707963" actuatorfrclimited="true" actuatorfrcrange="-40 40" user="15" damping="0" frictionloss="0.01" />
+              <joint name="ankle_L_Joint" type="hinge" axis="0 -1 0" limited="true" range="-1.1519173 1.5707963" actuatorfrclimited="true" actuatorfrcrange="-40 40" user="15" damping="0" frictionloss="0.33" />
               <geom name="ankle_L_Link_visual_1" class="visual" rgba="0.26667059 0.26667059 0.26667059 1.00000000" type="mesh" mesh="ankle_L_Link" />
               <geom name="ankle_L_Link_collision_1" class="collision" type="mesh" mesh="ankle_L_Link" />
             </body>
@@ -105,7 +105,7 @@
             <geom name="knee_R_Link_collision_1" class="collision" pos="0.078 0 -0.12" quat="0.962425197628 0 -0.271546936956 0" type="cylinder" size="0.02 0.13" />
             <body name="ankle_R_Link" pos="0.15 0 -0.25981">
               <inertial mass="0.62" pos="0.01074 0.00061 -0.03314" fullinertia="0.0005255 0.001812 0.0019738 0.0000035 -0.0000514 -0.0000065" />
-              <joint name="ankle_R_Joint" type="hinge" axis="0 -1 0" limited="true" range="-1.1519173 1.5707963" actuatorfrclimited="true" actuatorfrcrange="-40 40" user="15" damping="0" frictionloss="0.01" />
+              <joint name="ankle_R_Joint" type="hinge" axis="0 -1 0" limited="true" range="-1.1519173 1.5707963" actuatorfrclimited="true" actuatorfrcrange="-40 40" user="15" damping="0" frictionloss="0.33" />
               <geom name="ankle_R_Link_visual_1" class="visual" rgba="0.26667059 0.26667059 0.26667059 1.00000000" type="mesh" mesh="ankle_R_Link" />
               <geom name="ankle_R_Link_collision_1" class="collision" type="mesh" mesh="ankle_R_Link" />
             </body>

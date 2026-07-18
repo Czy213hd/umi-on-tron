@@ -87,6 +87,12 @@ DEFAULT_JOINT_POS = np.array(
     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
 )
+# IsaacLab clamps the reset state to the 0.9 soft joint-position limits.
+# J3's hard range is [-0.1, 3.2], so its reset value becomes 0.065 rad even
+# though the configured default is zero.  Use the state measured after reset,
+# because this is what the first policy/contactNet observation actually sees.
+ISAAC_RESET_JOINT_POS = DEFAULT_JOINT_POS.copy()
+ISAAC_RESET_JOINT_POS[JOINT_NAMES.index("J3")] = 0.065
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
@@ -158,7 +164,12 @@ def parse_args() -> argparse.Namespace:
         help="Simulation duration in seconds; 0 runs until the viewer closes. "
         "Default: 30 s manually, or one complete trajectory.",
     )
-    parser.add_argument("--base-height", type=float, default=0.84)
+    parser.add_argument(
+        "--base-height",
+        type=float,
+        default=0.8,
+        help="Initial base_Link height in metres (default: 0.8, matching IsaacLab play).",
+    )
     parser.add_argument(
         "--sample-latent",
         action="store_true",
@@ -956,7 +967,7 @@ class Sim2Sim:
         mujoco.mj_resetData(model, self.data)
         root_adr = model.joint("root").qposadr[0]
         self.data.qpos[root_adr : root_adr + 7] = [0.0, 0.0, base_height, 1.0, 0.0, 0.0, 0.0]
-        self.data.qpos[self.joint_qpos_adr] = DEFAULT_JOINT_POS
+        self.data.qpos[self.joint_qpos_adr] = ISAAC_RESET_JOINT_POS
         self.data.qvel[:] = 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(model, self.data)
@@ -964,7 +975,15 @@ class Sim2Sim:
         self.raw_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.effective_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.last_action = np.zeros(ACTION_DIM, dtype=np.float64)
-        self.last_torque = np.zeros(ACTION_DIM, dtype=np.float64)
+        # Before the first action is processed, IsaacLab's implicit actuators
+        # still have zero position targets.  Its initial applied_torque history
+        # is therefore KP * (0 - q_reset), notably J2=-9 and J3=-1.17 Nm.
+        # Seed all ten contactNet frames with the same reset-time semantics.
+        self.last_torque = np.clip(
+            -KP * ISAAC_RESET_JOINT_POS,
+            -TORQUE_LIMIT,
+            TORQUE_LIMIT,
+        )
         self.raw_desired_position = DEFAULT_JOINT_POS.copy()
         self.policy_desired_position = DEFAULT_JOINT_POS.copy()
         self.desired_position = DEFAULT_JOINT_POS.copy()
@@ -1118,12 +1137,13 @@ class Sim2Sim:
     def apply_pd(self, *, policy_updated: bool = False) -> None:
         position, velocity = self.joint_state()
         if policy_updated:
-            # Same torque-aware action clamp used by SolefootController.cpp.
-            action_min = position - DEFAULT_JOINT_POS + (KD * velocity - TORQUE_LIMIT) / KP
-            action_max = position - DEFAULT_JOINT_POS + (KD * velocity + TORQUE_LIMIT) / KP
-            self.effective_action = np.clip(self.raw_action, action_min, action_max)
+            # Match IsaacLab's JointPositionAction + ImplicitActuator chain:
+            # keep the raw position target for the full policy interval and
+            # saturate only the resulting PD torque below.  Pre-clipping the
+            # position target changes both the closed-loop dynamics and the
+            # last_action observation seen by the policy.
             self.raw_desired_position = DEFAULT_JOINT_POS + self.raw_action
-            self.policy_desired_position = DEFAULT_JOINT_POS + self.effective_action
+            self.policy_desired_position = self.raw_desired_position.copy()
 
             command = self.policy_desired_position.copy()
             if self.arm_max_step > 0.0:
@@ -1139,11 +1159,12 @@ class Sim2Sim:
                     self._previous_policy_command[LEG_IDS] + self.max_leg_step,
                 )
             self.desired_position = command
+            self.effective_action = command - DEFAULT_JOINT_POS
             self.policy_command_step = command - self._previous_policy_command
             self._previous_policy_command = command.copy()
-            # The policy observes the command that was actually applied, just
-            # like record_applied_targets() in the real deployment script.
-            self.last_action = command - DEFAULT_JOINT_POS
+            # mdp.last_action in IsaacLab exposes the raw action-manager input,
+            # not a torque-aware or rate-limited target.
+            self.last_action = self.raw_action.copy()
 
         torque = KP * (self.desired_position - position) - KD * velocity
         torque = np.clip(torque, -TORQUE_LIMIT, TORQUE_LIMIT)

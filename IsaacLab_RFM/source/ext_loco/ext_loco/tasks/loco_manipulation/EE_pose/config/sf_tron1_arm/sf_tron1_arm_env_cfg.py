@@ -538,11 +538,30 @@ class RewardsCfg:
         weight=0.5,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"), "threshold": 5.0},
     )
-    # foot_flat_l2 = RewTerm(
-    #     func=mdp.foot_flat_l2,
-    #     weight=-2.0,
-    #     params={"asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*")},
-    # )
+    # 2026-07-18 first-round foot-flat optimization:
+    # Transplant the senior implementation's world-frame foot-normal error, but apply it only
+    # to feet currently in contact and attenuate it with the real-time near-target standing gate.
+    # This targets toe/heel loading during manipulation without forcing the swing foot to remain
+    # flat during normal locomotion.  Keep the explicit L/R order for diagnostic logging.
+    # W&B exposes Episode_Reward/foot_flat_l2 and Metrics/EE_pose/precision/feet/* after resets.
+    foot_flat_l2 = RewTerm(
+        func=mdp.foot_flat_l2,
+        weight=-2.0,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                body_names=["ankle_L_Link", "ankle_R_Link"],
+                preserve_order=True,
+            ),
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["ankle_L_Link", "ankle_R_Link"],
+                preserve_order=True,
+            ),
+            "threshold": 5.0,
+            "command_name": "EE_pose",
+        },
+    )
     # foot_slip_l2 = RewTerm(
     #     func=mdp.foot_slip_l2,
     #     weight=-2.0,                      # by Edwin
