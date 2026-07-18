@@ -1415,6 +1415,7 @@ def run(args: argparse.Namespace) -> None:
         args.max_leg_step,
     )
     initial_ee_position, initial_ee_rotation = simulation.ee_pose_base()
+    initial_ee_position[0] += 0.15
     simulation.set_target(
         initial_ee_position,
         initial_ee_rotation,

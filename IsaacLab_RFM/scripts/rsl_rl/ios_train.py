@@ -25,6 +25,12 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument(
+    "--asset_usd_dir",
+    type=str,
+    default=None,
+    help="Per-process directory for converted robot USD assets.",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -93,6 +99,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if args_cli.asset_usd_dir is not None:
+        env_cfg.scene.robot.spawn.usd_dir = os.path.abspath(args_cli.asset_usd_dir)
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here

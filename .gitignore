@@ -9,6 +9,12 @@ IsaacLab_RFM/logs/
 IsaacLab_RFM/outputs/
 IsaacLab_RFM/wandb/
 
+# ── 服务器本地多 GPU sweep 工具 ─────────────────────────────
+# 仅用于当前四卡服务器；本机单卡训练不需要同步这些文件。
+/IsaacLab_RFM/scripts/rsl_rl/launch_4gpu_reward_sweep.sh
+/IsaacLab_RFM/scripts/rsl_rl/launch_4gpu_reward_sweep_GUIDE.md
+/IsaacLab_RFM/scripts/rsl_rl/tea_debug.log
+
 # ── IsaacLab 数据文件（pkl 轨迹体积大，建议单独管理）────────
 IsaacLab_RFM/data/*.pkl
 
