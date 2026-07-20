@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import torch
 import pickle
 import numpy as np
@@ -87,6 +88,365 @@ class UniformWorldPoseCommand(UniformPoseCommand):
         self.optim_orient_distance = torch.zeros(self.num_envs, device=self.device)
         self.pos_improvement = torch.zeros(self.num_envs, device=self.device)
         self.orient_improvement = torch.zeros(self.num_envs, device=self.device)
+        # +1 means approach with the base front; -1 means approach in reverse.
+        # The mode is fixed when a command is sampled so turning 180 degrees
+        # cannot change a rear target into a forward-walking target.
+        self.travel_direction = torch.ones(self.num_envs, device=self.device)
+
+        # Precision diagnostics are kept outside ``self.metrics`` because these values need
+        # command-local windows and episode-level aggregation.  ``CommandTerm.reset`` treats
+        # entries in ``self.metrics`` as instantaneous per-environment snapshots.
+        self._precision_metrics_enabled = cfg.precision_metrics_enabled
+        if self._precision_metrics_enabled:
+            self._initialize_precision_metrics(cfg)
+
+    def _initialize_precision_metrics(self, cfg: UniformWorldPoseCommandCfg):
+        """Allocate command-local histories and episode-level precision accumulators."""
+        if cfg.precision_window_s <= 0.0:
+            raise ValueError("precision_window_s must be positive")
+        if cfg.precision_hold_s <= 0.0:
+            raise ValueError("precision_hold_s must be positive")
+        if cfg.precision_trend_edge_s <= 0.0:
+            raise ValueError("precision_trend_edge_s must be positive")
+
+        self._precision_window_steps = max(1, math.ceil(cfg.precision_window_s / self._env.step_dt))
+        self._precision_hold_steps = max(1, math.ceil(cfg.precision_hold_s / self._env.step_dt))
+        self._precision_trend_edge_steps = max(
+            1,
+            min(
+                math.ceil(cfg.precision_trend_edge_s / self._env.step_dt),
+                max(1, self._precision_window_steps // 2),
+            ),
+        )
+        self._precision_position_threshold = cfg.precision_position_threshold
+        self._precision_orientation_threshold = cfg.precision_orientation_threshold
+        self._precision_mani_scale_threshold = cfg.precision_mani_scale_threshold
+
+        history_shape = (self.num_envs, self._precision_window_steps)
+        self._precision_position_history = torch.zeros(history_shape, device=self.device)
+        self._precision_orientation_history = torch.zeros(history_shape, device=self.device)
+        self._precision_finite_history = torch.zeros(history_shape, dtype=torch.bool, device=self.device)
+        self._precision_write_index = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._precision_sample_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._precision_hold_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._precision_command_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._precision_env_ids = torch.arange(self.num_envs, device=self.device)
+
+        # These accumulators span all commands within an episode.  A command is finalized before
+        # every target resample, so a final window never mixes samples from two different targets.
+        self._precision_episode_command_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._precision_episode_success_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._precision_episode_final_window_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._precision_episode_step_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._precision_episode_finite_step_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._precision_episode_mani_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+        for name in (
+            "final_position_mean_sum",
+            "final_position_p95_sum",
+            "final_position_drop_sum",
+            "final_orientation_mean_sum",
+            "final_orientation_p95_sum",
+            "final_orientation_drop_sum",
+            "mani_position_sum",
+            "mani_orientation_sum",
+            "foot_standing_weight_sum",
+            "foot_both_contact_weight_sum",
+            "foot_left_contact_weight_sum",
+            "foot_right_contact_weight_sum",
+            "foot_left_tilt_weighted_sum",
+            "foot_right_tilt_weighted_sum",
+        ):
+            setattr(self, f"_precision_episode_{name}", torch.zeros(self.num_envs, device=self.device))
+
+    def _resolve_env_ids(self, env_ids: Sequence[int] | slice | None) -> torch.Tensor:
+        """Return environment IDs as a device-local one-dimensional tensor."""
+        all_env_ids = self._precision_env_ids if self._precision_metrics_enabled else torch.arange(
+            self.num_envs, device=self.device
+        )
+        if env_ids is None:
+            return all_env_ids
+        if isinstance(env_ids, slice):
+            return all_env_ids[env_ids]
+        if isinstance(env_ids, torch.Tensor):
+            return env_ids.to(device=self.device, dtype=torch.long).flatten()
+        return torch.as_tensor(env_ids, device=self.device, dtype=torch.long).flatten()
+
+    def _record_precision_sample(self):
+        """Record one tracking-error sample for every active command."""
+        position_error = self.metrics["position_error"]
+        orientation_error = self.metrics["orientation_error"]
+        rows = self._precision_env_ids
+        finite_mask = torch.isfinite(position_error) & torch.isfinite(orientation_error)
+        safe_position_error = torch.where(finite_mask, position_error, torch.zeros_like(position_error))
+        safe_orientation_error = torch.where(
+            finite_mask, orientation_error, torch.zeros_like(orientation_error)
+        )
+        columns = self._precision_write_index
+
+        self._precision_position_history[rows, columns] = safe_position_error
+        self._precision_orientation_history[rows, columns] = safe_orientation_error
+        self._precision_finite_history[rows, columns] = finite_mask
+        self._precision_write_index = (columns + 1) % self._precision_window_steps
+        self._precision_sample_count = torch.clamp(
+            self._precision_sample_count + 1, max=self._precision_window_steps
+        )
+
+        self._precision_episode_step_count += 1
+        self._precision_episode_finite_step_count += finite_mask
+
+        mani_scale = self._env._loco_mani_scale  # type: ignore
+        mani_mask = finite_mask & torch.isfinite(mani_scale) & (
+            mani_scale < self._precision_mani_scale_threshold
+        )
+        self._precision_episode_mani_position_sum += safe_position_error * mani_mask
+        self._precision_episode_mani_orientation_sum += safe_orientation_error * mani_mask
+        self._precision_episode_mani_count += mani_mask
+        self._record_foot_flat_diagnostics(finite_mask)
+
+        inside_tolerance = (position_error <= self._precision_position_threshold) & (
+            orientation_error <= self._precision_orientation_threshold
+        )
+        self._precision_hold_count = torch.where(
+            inside_tolerance,
+            self._precision_hold_count + 1,
+            torch.zeros_like(self._precision_hold_count),
+        )
+        self._precision_command_success |= self._precision_hold_count >= self._precision_hold_steps
+
+    def _record_foot_flat_diagnostics(self, finite_tracking_mask: torch.Tensor):
+        """Accumulate standing-gate-weighted foot tilt/contact diagnostics from the reward cache."""
+        diagnostics = getattr(self._env, "_foot_flat_diagnostics", None)
+        if not isinstance(diagnostics, dict):
+            return
+
+        tilt_rad = diagnostics.get("tilt_rad")
+        contact_mask = diagnostics.get("contact_mask")
+        standing_gate = diagnostics.get("standing_gate")
+        if not all(isinstance(value, torch.Tensor) for value in (tilt_rad, contact_mask, standing_gate)):
+            return
+        if tilt_rad.shape != (self.num_envs, 2) or contact_mask.shape != (self.num_envs, 2):
+            return
+        if standing_gate.shape != (self.num_envs,):
+            return
+
+        valid_gate = finite_tracking_mask & torch.isfinite(standing_gate)
+        standing_weight = torch.where(
+            valid_gate,
+            torch.clamp(standing_gate, min=0.0, max=1.0),
+            torch.zeros_like(standing_gate),
+        )
+        self._precision_episode_foot_standing_weight_sum += standing_weight
+        self._precision_episode_foot_both_contact_weight_sum += (
+            standing_weight * torch.all(contact_mask, dim=1)
+        )
+
+        for foot_index, side in enumerate(("left", "right")):
+            valid_tilt = torch.isfinite(tilt_rad[:, foot_index])
+            contact_weight = (
+                standing_weight
+                * contact_mask[:, foot_index]
+                * valid_tilt
+            )
+            safe_tilt = torch.where(
+                valid_tilt,
+                tilt_rad[:, foot_index],
+                torch.zeros_like(tilt_rad[:, foot_index]),
+            )
+            getattr(self, f"_precision_episode_foot_{side}_contact_weight_sum").add_(
+                contact_weight
+            )
+            getattr(self, f"_precision_episode_foot_{side}_tilt_weighted_sum").add_(
+                safe_tilt * contact_weight
+            )
+
+    def _finalize_precision_command(self, env_ids: Sequence[int] | torch.Tensor):
+        """Aggregate the active command before its target changes, then clear command-local state."""
+        if not self._precision_metrics_enabled:
+            return
+
+        env_ids = self._resolve_env_ids(env_ids)
+        if env_ids.numel() == 0:
+            return
+
+        seen_mask = self._precision_sample_count[env_ids] > 0
+        self._precision_episode_command_count[env_ids] += seen_mask.long()
+        self._precision_episode_success_count[env_ids] += (
+            seen_mask & self._precision_command_success[env_ids]
+        ).long()
+
+        full_window_mask = (
+            self._precision_sample_count[env_ids] == self._precision_window_steps
+        ) & self._precision_finite_history[env_ids].all(dim=1)
+        valid_env_ids = env_ids[full_window_mask]
+        if valid_env_ids.numel() > 0:
+            sample_offsets = torch.arange(self._precision_window_steps, device=self.device)
+            chronological_indices = (
+                self._precision_write_index[valid_env_ids, None] + sample_offsets[None, :]
+            ) % self._precision_window_steps
+            position_window = self._precision_position_history[valid_env_ids].gather(
+                1, chronological_indices
+            )
+            orientation_window = self._precision_orientation_history[valid_env_ids].gather(
+                1, chronological_indices
+            )
+            edge_steps = self._precision_trend_edge_steps
+
+            self._precision_episode_final_position_mean_sum[valid_env_ids] += position_window.mean(dim=1)
+            self._precision_episode_final_position_p95_sum[valid_env_ids] += torch.quantile(
+                position_window, 0.95, dim=1
+            )
+            self._precision_episode_final_position_drop_sum[valid_env_ids] += (
+                position_window[:, :edge_steps].mean(dim=1)
+                - position_window[:, -edge_steps:].mean(dim=1)
+            )
+            self._precision_episode_final_orientation_mean_sum[valid_env_ids] += orientation_window.mean(dim=1)
+            self._precision_episode_final_orientation_p95_sum[valid_env_ids] += torch.quantile(
+                orientation_window, 0.95, dim=1
+            )
+            self._precision_episode_final_orientation_drop_sum[valid_env_ids] += (
+                orientation_window[:, :edge_steps].mean(dim=1)
+                - orientation_window[:, -edge_steps:].mean(dim=1)
+            )
+            self._precision_episode_final_window_count[valid_env_ids] += 1
+
+        self._precision_write_index[env_ids] = 0
+        self._precision_sample_count[env_ids] = 0
+        self._precision_hold_count[env_ids] = 0
+        self._precision_command_success[env_ids] = False
+
+    def _precision_extras(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return weighted sums/counts that the runner combines across asynchronous resets."""
+        final_count = self._precision_episode_final_window_count[env_ids]
+        command_count = self._precision_episode_command_count[env_ids]
+        mani_count = self._precision_episode_mani_count[env_ids]
+        step_count = self._precision_episode_step_count[env_ids]
+        finite_step_count = self._precision_episode_finite_step_count[env_ids]
+        standing_weight = self._precision_episode_foot_standing_weight_sum[env_ids]
+        left_contact_weight = self._precision_episode_foot_left_contact_weight_sum[env_ids]
+        right_contact_weight = self._precision_episode_foot_right_contact_weight_sum[env_ids]
+
+        weighted_metrics = {
+            "precision/final_1s_position_error_mean_m": (
+                self._precision_episode_final_position_mean_sum[env_ids],
+                final_count,
+            ),
+            "precision/final_1s_position_error_temporal_p95_mean_m": (
+                self._precision_episode_final_position_p95_sum[env_ids],
+                final_count,
+            ),
+            "precision/final_1s_position_error_drop_m": (
+                self._precision_episode_final_position_drop_sum[env_ids],
+                final_count,
+            ),
+            "precision/final_1s_orientation_error_mean_rad": (
+                self._precision_episode_final_orientation_mean_sum[env_ids],
+                final_count,
+            ),
+            "precision/final_1s_orientation_error_temporal_p95_mean_rad": (
+                self._precision_episode_final_orientation_p95_sum[env_ids],
+                final_count,
+            ),
+            "precision/final_1s_orientation_error_drop_rad": (
+                self._precision_episode_final_orientation_drop_sum[env_ids],
+                final_count,
+            ),
+            "precision/final_1s_valid_command_fraction": (final_count, command_count),
+            "precision/manipulation_position_error_mean_m": (
+                self._precision_episode_mani_position_sum[env_ids],
+                mani_count,
+            ),
+            "precision/manipulation_orientation_error_mean_rad": (
+                self._precision_episode_mani_orientation_sum[env_ids],
+                mani_count,
+            ),
+            "precision/manipulation_sample_fraction": (mani_count, finite_step_count),
+            "precision/finite_sample_fraction": (finite_step_count, step_count),
+            "precision/success_5cm_5deg_hold_0p5s_rate": (
+                self._precision_episode_success_count[env_ids],
+                command_count,
+            ),
+            "precision/feet/near_target_standing_gate_mean": (
+                standing_weight,
+                finite_step_count,
+            ),
+            "precision/feet/near_target_both_contact_fraction": (
+                self._precision_episode_foot_both_contact_weight_sum[env_ids],
+                standing_weight,
+            ),
+            "precision/feet/near_target_left_contact_fraction": (
+                left_contact_weight,
+                standing_weight,
+            ),
+            "precision/feet/near_target_right_contact_fraction": (
+                right_contact_weight,
+                standing_weight,
+            ),
+            "precision/feet/near_target_contact_foot_tilt_mean_rad": (
+                self._precision_episode_foot_left_tilt_weighted_sum[env_ids]
+                + self._precision_episode_foot_right_tilt_weighted_sum[env_ids],
+                left_contact_weight + right_contact_weight,
+            ),
+            "precision/feet/near_target_left_contact_foot_tilt_mean_rad": (
+                self._precision_episode_foot_left_tilt_weighted_sum[env_ids],
+                left_contact_weight,
+            ),
+            "precision/feet/near_target_right_contact_foot_tilt_mean_rad": (
+                self._precision_episode_foot_right_tilt_weighted_sum[env_ids],
+                right_contact_weight,
+            ),
+        }
+
+        extras = {}
+        for name, (numerator, denominator) in weighted_metrics.items():
+            extras[f"{name}.__weighted_sum"] = numerator.sum()
+            extras[f"{name}.__weighted_count"] = denominator.sum()
+        return extras
+
+    def _clear_episode_precision_metrics(self, env_ids: torch.Tensor):
+        """Clear episode-level accumulators after their values have been logged."""
+        for name in (
+            "command_count",
+            "success_count",
+            "final_window_count",
+            "step_count",
+            "finite_step_count",
+            "mani_count",
+            "final_position_mean_sum",
+            "final_position_p95_sum",
+            "final_position_drop_sum",
+            "final_orientation_mean_sum",
+            "final_orientation_p95_sum",
+            "final_orientation_drop_sum",
+            "mani_position_sum",
+            "mani_orientation_sum",
+            "foot_standing_weight_sum",
+            "foot_both_contact_weight_sum",
+            "foot_left_contact_weight_sum",
+            "foot_right_contact_weight_sum",
+            "foot_left_tilt_weighted_sum",
+            "foot_right_tilt_weighted_sum",
+        ):
+            getattr(self, f"_precision_episode_{name}")[env_ids] = 0
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float | torch.Tensor]:
+        """Reset commands and expose command-aware precision diagnostics."""
+        resolved_env_ids = self._resolve_env_ids(env_ids)
+        precision_extras = {}
+        if self._precision_metrics_enabled:
+            self._finalize_precision_command(resolved_env_ids)
+            precision_extras = self._precision_extras(resolved_env_ids)
+
+        extras = super().reset(resolved_env_ids)
+
+        if self._precision_metrics_enabled:
+            self._clear_episode_precision_metrics(resolved_env_ids)
+        extras.update(precision_extras)
+        return extras
 
     def _refresh_pose_command_b(self):
         """Refresh pose_command_b by transforming world-frame command into robot base frame."""
@@ -96,6 +456,15 @@ class UniformWorldPoseCommand(UniformPoseCommand):
         )
         self.pose_command_b[:, 3:] = quat_unique(
             quat_mul(quat_inv(self.robot.data.root_link_quat_w), self.pose_command_w[:, 3:])
+        )
+
+    def _set_travel_direction(self, env_ids: Sequence[int]):
+        """Choose forward for the initial front half-plane and reverse for the rear."""
+        self._refresh_pose_command_b()
+        self.travel_direction[env_ids] = torch.where(
+            self.pose_command_b[env_ids, 0] >= 0.0,
+            1.0,
+            -1.0,
         )
 
     def _update_metrics(self):
@@ -119,6 +488,8 @@ class UniformWorldPoseCommand(UniformPoseCommand):
         self._env._loco_mani_scale = generate_sigmoid_scale(  # type: ignore
             mu=1.0, decay_length=1.0, x=self.se3_distance_ref
         )
+        if self._precision_metrics_enabled:
+            self._record_precision_sample()
 
     def _update_se3_ref(self, env_ids: Sequence[int]):
         self._refresh_pose_command_b()
@@ -153,9 +524,13 @@ class UniformWorldPoseCommand(UniformPoseCommand):
         self.decrease_vel[env_ids] = sample_uniform(
             self.decrease_vel_range[0], self.decrease_vel_range[1], len(env_ids), device=self.device
         )
+        self._set_travel_direction(env_ids)
 
     def _resample(self, env_ids):
-        if len(env_ids) != 0:
+        env_ids = self._resolve_env_ids(env_ids)
+        if self._precision_metrics_enabled:
+            self._finalize_precision_command(env_ids)
+        if env_ids.numel() != 0:
             self._resample_command(env_ids)
             self._update_se3_ref(env_ids)
             se3_error = 2 * self.metrics["position_error"][env_ids] + self.metrics["orientation_error"][env_ids]
@@ -173,6 +548,13 @@ class UniformWorldPoseCommandCfg(UniformPoseCommandCfg):
     class_type: type = UniformWorldPoseCommand
     se3_decrease_vel_range: tuple[float, float] = (0.5, 1.4)
     resampling_time_scale: tuple[float, float] = (6.0, 15.0)
+    precision_metrics_enabled: bool = False
+    precision_window_s: float = 1.0
+    precision_trend_edge_s: float = 0.2
+    precision_hold_s: float = 0.5
+    precision_position_threshold: float = 0.05
+    precision_orientation_threshold: float = math.radians(5.0)
+    precision_mani_scale_threshold: float = 0.1
 
 
 class PicklePoseSequenceCommand(UniformWorldPoseCommand):
@@ -271,6 +653,7 @@ class PicklePoseSequenceCommand(UniformWorldPoseCommand):
             )
             self._need_origin_update[update_ids] = False
             self._update_command_w(update_ids.tolist())
+            self._set_travel_direction(update_ids)
 
         self._update_command_w(range(self.num_envs))
         # Parent handles metric updates and time_left countdown
@@ -282,9 +665,10 @@ class PicklePoseSequenceCommand(UniformWorldPoseCommand):
         self.ee_pose_history[:, -1, :] = torch.cat([current_pos, current_quat], dim=-1)
 
     def _resample(self, env_ids):
+        env_ids = self._resolve_env_ids(env_ids)
         super()._resample(env_ids)
         # Reset history to current pose to avoid discontinuities after reset
-        if len(env_ids) > 0:
+        if env_ids.numel() > 0:
             current_pos = self.robot.data.body_link_state_w[env_ids, self.body_idx, :3]
             current_quat = self.robot.data.body_link_state_w[env_ids, self.body_idx, 3:7]
             current_pose = torch.cat([current_pos, current_quat], dim=-1)
@@ -338,6 +722,7 @@ class PicklePoseSequenceCommand(UniformWorldPoseCommand):
         self._need_origin_update[env_ids] = True
         # Initialize command immediately so metrics/time_left use fresh targets
         self._update_command_w(env_ids)
+        self._set_travel_direction(env_ids)
 
 
 @configclass

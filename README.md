@@ -152,6 +152,24 @@ docker run -d \
 | `WF_TRON1A` | 轮足 Tron1（无机械臂） |
 | `SF_TRON1A_ARX5ARM` | 标准 Tron1 双足 + ARX5 机械臂 |
 
+## Ubuntu 录屏格式转换
+
+Ubuntu 录屏通常保存为 `.webm`。使用以下脚本可转换为兼容性更好的 H.264/AAC `.mp4`：
+
+```bash
+# 首次使用时安装依赖
+sudo apt update && sudo apt install ffmpeg
+
+# 转换单个录屏（MP4 会生成在原文件旁）
+./scripts/convert_webm_to_mp4.sh ~/Videos/recording.webm
+
+# 批量转换一个目录内的所有录屏
+./scripts/convert_webm_to_mp4.sh ~/Videos/Recordings ~/Videos/MP4
+```
+
+默认会保留已有的 MP4 文件；需要覆盖时加 `--force`。脚本默认输出 30 fps、使用较快的 `veryfast` 预设，并实时显示进度和预计剩余时间。需要保留 60 fps 时可加 `--fps 60`；需要更高画质时可降低 CRF，例如 `--crf 20`。
+脚本会自动将奇数宽高向下调整 1 像素，以满足 H.264 MP4 的编码要求。
+
 ## IsaacLab RFM 训练
 
 ### 环境配置

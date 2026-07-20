@@ -26,6 +26,11 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument(
+    "--export-only",
+    action="store_true",
+    help="Export the loaded checkpoint to ONNX and exit without entering the play loop.",
+)
 # parser.add_argument("--use_teleop", type=str, default=False, help="Use Device for interacting with environment")
 
 # append RSL-RL cli arguments
@@ -81,8 +86,11 @@ def main():
     env_cfg.seed = agent_cfg.seed
 
     # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
+    # Match ios_train.py so that new runs saved on the external log drive can
+    # be found by play/resume without copying checkpoints back into the repo.
+    log_root_path = os.path.abspath(
+        os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs")
+    )
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
     log_dir = os.path.dirname(resume_path)
@@ -172,6 +180,10 @@ def main():
         path=export_model_dir,
         filename="gru.onnx",
     )
+    if args_cli.export_only:
+        print(f"[INFO] Exported actor/contactNet/gru ONNX files to: {export_model_dir}")
+        env.close()
+        return
     # export_cn_policy_as_onnx(
     #     runner.num_obs,
     #     agent_cfg.contactNet.output_dim - agent_cfg.contactNet.latent_dim - 4,

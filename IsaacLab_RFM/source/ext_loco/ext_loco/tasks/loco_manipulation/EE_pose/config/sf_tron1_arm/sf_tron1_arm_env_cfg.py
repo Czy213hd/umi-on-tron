@@ -92,7 +92,7 @@ class CommandsCfg:
     # Training command: random world-frame target pose (point-wise command)
     EE_pose = mdp.UniformWorldPoseCommandCfg(
         asset_name="robot",
-        body_name="link6",
+        body_name="eef_link",
         resampling_time_range=(6.0, 15.0),
         resampling_time_scale=(0.5, 5.0),
         make_quat_unique=True,
@@ -105,6 +105,14 @@ class CommandsCfg:
             yaw=(-3.2, 3.2),
         ),
         se3_decrease_vel_range=(0.5, 1.4),
+        # Precision diagnostics only affect logging; they do not change observations or rewards.
+        precision_metrics_enabled=True,
+        precision_window_s=1.0,
+        precision_trend_edge_s=0.2,
+        precision_hold_s=0.5,
+        precision_position_threshold=0.05,
+        precision_orientation_threshold=math.radians(5.0),
+        precision_mani_scale_threshold=0.1,
         debug_vis=True,
     )
 
@@ -115,14 +123,14 @@ class CommandsCfgPlay:
 
     EE_pose = mdp.PicklePoseSequenceCommandCfg(
         asset_name="robot",
-        body_name="link6",
+        body_name="eef_link",
         # World frame EE pose pkl from umi
         file_path="/home/phi5090ii/NYX/umi-on-tron-lab/IsaacLab_RFM/data/pushing.pkl",
         planar_center=True,
         # add_random_height_range=(-0.05, 0.05),
-        tip_offset_pos=(0.08657, -0.0249, -0.00024366),  # link6 -> tip (joint8 origin)
-        # rotate link6 to UMI tip frame: Rx(-90deg) then Rz(-90deg) (intrinsic XYZ with y=0)
-        tip_offset_rpy=(-math.pi * 0.5, 0.0, -math.pi * 0.5),
+        # eef_link is fixed at the UMI gripper base frame, so no extra link6->tip offset is applied.
+        tip_offset_pos=(0.0, 0.0, 0.0),
+        tip_offset_rpy=(0.0, 0.0, 0.0),
         episode_length_s=10,
         pose_latency=0.1,
         history_buffer_length=100,
@@ -147,7 +155,7 @@ class CommandsCfgCommandPlay:
 
     EE_pose = mdp.UniformWorldPoseCommandCfg(
         asset_name="robot",
-        body_name="link6",
+        body_name="eef_link",
         resampling_time_range=(1.0e9, 1.0e9),
         resampling_time_scale=(1.0, 1.0),
         make_quat_unique=True,
@@ -214,7 +222,7 @@ class ObservationsCfg:
         EE_pose = ObsTerm(
             func=mdp.EE_current_pose_b,
             noise=Unoise(n_min=-0.05, n_max=0.05),
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6")},
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link")},
         )  # 9
         EE_se3_distance_reference = ObsTerm(func=mdp.EE_se3_distance_ref) # 1
 
@@ -238,7 +246,7 @@ class ObservationsCfg:
         EE_pose = ObsTerm(
             func=mdp.EE_current_pose_b,
             noise=Unoise(n_min=-0.05, n_max=0.05),
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6")},
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link")},
         )  # 9
 
         def __post_init__(self):
@@ -260,7 +268,7 @@ class ObservationsCfg:
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)  # 55
         EE_pose = ObsTerm(
             func=mdp.EE_current_pose_b,
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6")},
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link")},
         )  # 86
         foot_position_b = ObsTerm(
             func=mdp.foot_position_b,
@@ -287,11 +295,11 @@ class ObservationsCfg:
         joint_acc = ObsTerm(func=mdp.joint_acc)  # 167
         EE_lin_vel = ObsTerm(
             func=mdp.body_any_vel,
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6"), "vel_type": "linear"},
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link"), "vel_type": "linear"},
         )  
         EE_ang_vel = ObsTerm(
             func=mdp.body_any_vel,
-            params={"asset_cfg": SceneEntityCfg("robot", body_names="link6"), "vel_type": "angular"},
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="eef_link"), "vel_type": "angular"},
         )  
         
         # EE_se3_cb_error = ObsTerm(func=mdp.EE_se3_cb_error, scale=3.0)  # 152
@@ -335,8 +343,8 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.8, 0.8),
-            "dynamic_friction_range": (0.6, 0.6),
+            "static_friction_range": (0.6, 1),       # by CZY
+            "dynamic_friction_range": (0.4, 0.9),    # by CZY
             "restitution_range": (0.0, 0.0),
             "num_buckets": 64,
         },
@@ -348,7 +356,7 @@ class EventCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base_Link"),
             # "mass_distribution_params": (-5.0, 5.0),
-            "mass_distribution_params": (-0.5, 2.0),
+            "mass_distribution_params": (-0.5, 3.0),   # by CZY
             "operation": "add",
         },
     )
@@ -422,7 +430,7 @@ class RewardsCfg:
 
     # Safety
     safety_exp = RewTerm(
-        func=mdp.safety_reward_exp, weight=1.0, params={"base_height_target": 0.8, "std": math.sqrt(0.5)}
+        func=mdp.safety_reward_exp, weight=2.0, params={"base_height_target": 0.8, "std": math.sqrt(0.5)}
     )
     # pose_product = RewTerm(
     #     func=mdp.pose_product_reward,
@@ -430,8 +438,8 @@ class RewardsCfg:
     #     params={"pos_sigma": 0.6, "orn_sigma": 2.0, "command_name": "EE_pose"},
     # )
     # EE Tracking
-    track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=2.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)}) #2
-    track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=3.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})
+    track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=3.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})            #2.0 by Edwin
+    track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=4.5, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})      #3.0 by Edwin
     track_EE_pb = RewTerm(func=mdp.track_EE_pb, weight=20.0)
     track_EE_reference_exp = RewTerm(func=mdp.track_EE_reference_exp, weight=5.0, params={"std": math.sqrt(0.5), "init_value": 0.98})
 
@@ -491,7 +499,7 @@ class RewardsCfg:
     # dof_acc_l2 = RewTerm(
     #     func=mdp.joint_acc_l2, weight=-2.0e-6, params={"asset_cfg": SceneEntityCfg("robot", joint_names="J.*")}
     # )
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-1.0e-2)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.1) #1.0 By Edwin
     action_smoothness = RewTerm(func=mdp.action_smoothness_penalty, weight=-5.0e-4)
 
     # -- optional penalties
@@ -520,25 +528,49 @@ class RewardsCfg:
         weight=-1.5,
         params={"joint_names": ["J1", "J5"]},
     )
+    # base_bidirectional_target_alignment = RewTerm(
+    #     func=mdp.base_bidirectional_target_alignment,
+    #     weight=-2.0,
+    #     params={"command_name": "EE_pose", "min_target_distance": 0.1},
+    # )
     feet_contacts_reg = RewTerm(
         func=mdp.feet_contacts_reg,
         weight=0.5,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"), "threshold": 5.0},
     )
+    # 2026-07-18 first-round foot-flat optimization:
+    # Transplant the senior implementation's world-frame foot-normal error, but apply it only
+    # to feet currently in contact and attenuate it with the real-time near-target standing gate.
+    # This targets toe/heel loading during manipulation without forcing the swing foot to remain
+    # flat during normal locomotion.  Keep the explicit L/R order for diagnostic logging.
+    # W&B exposes Episode_Reward/foot_flat_l2 and Metrics/EE_pose/precision/feet/* after resets.
     foot_flat_l2 = RewTerm(
         func=mdp.foot_flat_l2,
         weight=-2.0,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*")},
-    )
-    foot_slip_l2 = RewTerm(
-        func=mdp.foot_slip_l2,
-        weight=-1.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*"),
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"),
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                body_names=["ankle_L_Link", "ankle_R_Link"],
+                preserve_order=True,
+            ),
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["ankle_L_Link", "ankle_R_Link"],
+                preserve_order=True,
+            ),
             "threshold": 5.0,
+            "command_name": "EE_pose",
         },
     )
+    # foot_slip_l2 = RewTerm(
+    #     func=mdp.foot_slip_l2,
+    #     weight=-2.0,                      # by Edwin
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*"),
+    #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"),
+    #         "threshold": 5.0,
+    #     },
+    # )
     legs_min_separation = RewTerm(
         func=mdp.legs_min_separation,
         weight=-10,
@@ -725,6 +757,11 @@ class LimxEEposeCommandEnvCfg_PLAY(LimxEEposeRoughEnvCfg):
 
         # Use a fixed EE command for play/eval instead of a pickle trajectory.
         self.commands = CommandsCfgCommandPlay()
+
+        # This task uses one fixed target pose.  The inherited training
+        # curricula expand symmetric command ranges at reset, which turns the
+        # fixed negative x target into an invalid (min > max) range.
+        self.curriculum = None
 
         # make a smaller scene for play
         self.scene.num_envs = 50

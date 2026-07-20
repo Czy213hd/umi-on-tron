@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import pickle
+import select
 import sys
+import termios
 import threading
 import time
+import tty
 import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
@@ -40,25 +44,29 @@ DEPLOYED_MODEL_DIR = (
     / "tron1_ws/src/tron1-rl-deploy-arm/src/robot_controllers/config/"
     "pointfoot/SF_TRON1A_ARX5ARM/policy"
 )
+WBC_LOG_ROOT = Path(os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs"))
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
-TIP_OFFSET_POS = np.array([0.08657, -0.0249, -0.00024366], dtype=np.float64)
-TIP_OFFSET_RPY = (-math.pi * 0.5, 0.0, -math.pi * 0.5)
+# The trained task tracks the URDF's eef_link directly.  It is already the
+# UMI gripper-base frame, so the former link6 -> tip conversion must not run.
+TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
+TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
 
-# This order must match PointfootCfg.init_state.joint_names and the training
-# articulation order. It is intentionally not MuJoCo's internal joint order.
+# This is the Isaac Lab articulation/action order measured at runtime for the
+# training asset.  MuJoCo state and actuator addresses are explicitly gathered
+# by name below, so they must be exposed to the policy in this exact order.
 JOINT_NAMES = (
-    "J1",
     "abad_L_Joint",
     "abad_R_Joint",
-    "J2",
     "hip_L_Joint",
     "hip_R_Joint",
-    "J3",
     "knee_L_Joint",
     "knee_R_Joint",
-    "J4",
+    "J1",
     "ankle_L_Joint",
     "ankle_R_Joint",
+    "J2",
+    "J3",
+    "J4",
     "J5",
     "J6",
 )
@@ -76,21 +84,27 @@ ARM_NAMES = ("J1", "J2", "J3", "J4", "J5", "J6")
 LEG_IDS = np.array([JOINT_NAMES.index(name) for name in LEG_NAMES], dtype=int)
 ARM_IDS = np.array([JOINT_NAMES.index(name) for name in ARM_NAMES], dtype=int)
 DEFAULT_JOINT_POS = np.array(
-    [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
 )
+# IsaacLab clamps the reset state to the 0.9 soft joint-position limits.
+# J3's hard range is [-0.1, 3.2], so its reset value becomes 0.065 rad even
+# though the configured default is zero.  Use the state measured after reset,
+# because this is what the first policy/contactNet observation actually sees.
+ISAAC_RESET_JOINT_POS = DEFAULT_JOINT_POS.copy()
+ISAAC_RESET_JOINT_POS[JOINT_NAMES.index("J3")] = 0.065
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
-    [18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 18.0, 40.0, 40.0, 4.0, 45.0, 45.0, 4.0, 4.0],
+    [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 18.0, 45.0, 45.0, 18.0, 18.0, 4.0, 4.0, 4.0],
     dtype=np.float64,
 )
 KD = np.array(
-    [1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 1.0, 1.8, 1.8, 0.5, 0.8, 0.8, 0.5, 0.5],
+    [1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.0, 0.8, 0.8, 1.0, 1.0, 0.5, 0.5, 0.5],
     dtype=np.float64,
 )
 TORQUE_LIMIT = np.array(
-    [18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 18.0, 80.0, 80.0, 3.0, 40.0, 40.0, 3.0, 3.0],
+    [80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 18.0, 40.0, 40.0, 18.0, 18.0, 3.0, 3.0, 3.0],
     dtype=np.float64,
 )
 
@@ -104,6 +118,11 @@ HISTORY_LENGTH = 10
 OBS_DIM = 65
 CONTACT_OBS_DIM = 55
 ACTION_DIM = 14
+# MuJoCo's friction tuple is (sliding, torsional, rolling); it does not expose
+# separate static and dynamic coefficients.  Use the IsaacLab terrain's nominal
+# coefficient for deterministic sim2sim evaluation.  Training randomization is
+# configured independently in the IsaacLab environment and is not changed here.
+MUJOCO_CONTACT_FRICTION = "1.0 0.005 0.0001"
 
 
 def format_named(names: tuple[str, ...], values: np.ndarray) -> str:
@@ -136,7 +155,7 @@ def parse_args() -> argparse.Namespace:
         "--model-dir",
         type=Path,
         help="Directory containing actor.onnx, contactNet.onnx and gru.onnx. "
-        "Default: newest exported training run.",
+        "Default: newest exported run under WBC_LOG_ROOT, then the legacy local log.",
     )
     parser.add_argument(
         "--duration",
@@ -145,7 +164,12 @@ def parse_args() -> argparse.Namespace:
         help="Simulation duration in seconds; 0 runs until the viewer closes. "
         "Default: 30 s manually, or one complete trajectory.",
     )
-    parser.add_argument("--base-height", type=float, default=0.84)
+    parser.add_argument(
+        "--base-height",
+        type=float,
+        default=0.8,
+        help="Initial base_Link height in metres (default: 0.8, matching IsaacLab play).",
+    )
     parser.add_argument(
         "--sample-latent",
         action="store_true",
@@ -167,6 +191,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--keyboard-step",
+        "--keyboard",
+        dest="keyboard_step",
         type=float,
         default=0.02,
         help="Target-position increment per key press in metres (default: 0.02).",
@@ -226,14 +252,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def newest_exported_model_dir() -> Path:
-    log_root = ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm"
+    # Training now writes to WBC_LOG_ROOT. Keep the in-repository location as
+    # a fallback so old local runs remain usable.
+    log_roots = (
+        WBC_LOG_ROOT,
+        ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm",
+    )
     candidates = [
         path
+        for log_root in log_roots
         for path in log_root.glob("*/exported")
         if all((path / name).is_file() for name in ("actor.onnx", "contactNet.onnx", "gru.onnx"))
     ]
     if candidates:
-        return max(candidates, key=lambda path: path.parent.name)
+        return max(candidates, key=lambda path: (path.parent.stat().st_mtime_ns, path.parent.name))
     return DEPLOYED_MODEL_DIR
 
 
@@ -435,6 +467,44 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
             {"diffuse": "0.7 0.7 0.7", "ambient": "0.25 0.25 0.25", "specular": "0.2 0.2 0.2"},
         )
 
+    # Procedural blue checkerboard matching the familiar MuJoCo grid floor.
+    # It lives only in the in-memory model, so the source robot MJCF remains
+    # reusable by deployments that do not want this viewer styling.
+    asset = root.find("asset")
+    if asset is None:
+        asset = ET.Element("asset")
+        worldbody_index = next(
+            (index for index, element in enumerate(root) if element.tag == "worldbody"),
+            len(root),
+        )
+        root.insert(worldbody_index, asset)
+    ET.SubElement(
+        asset,
+        "texture",
+        {
+            "name": "sim2sim_checker_texture",
+            "type": "2d",
+            "builtin": "checker",
+            "mark": "edge",
+            "rgb1": "0.12 0.25 0.38",
+            "rgb2": "0.24 0.42 0.58",
+            "markrgb": "0.55 0.68 0.78",
+            "width": "512",
+            "height": "512",
+        },
+    )
+    ET.SubElement(
+        asset,
+        "material",
+        {
+            "name": "sim2sim_checker_material",
+            "texture": "sim2sim_checker_texture",
+            "texrepeat": "5 5",
+            "texuniform": "true",
+            "reflectance": "0.15",
+        },
+    )
+
     worldbody = root.find("worldbody")
     if worldbody is None:
         raise ValueError("MJCF has no worldbody")
@@ -446,8 +516,8 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
                 "name": "sim2sim_floor",
                 "type": "plane",
                 "size": "0 0 0.1",
-                "rgba": "0.32 0.35 0.38 1",
-                "friction": "0.8 0.6 0.001",
+                "material": "sim2sim_checker_material",
+                "friction": MUJOCO_CONTACT_FRICTION,
                 "condim": "3",
                 "solref": "0.005 1",
                 "solimp": "0.95 0.99 0.001",
@@ -461,6 +531,102 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
             {"name": "sim2sim_light", "pos": "0 -1 3", "dir": "0 0 -1", "directional": "true"},
         ),
     )
+
+    # A fixed doorway with a dynamic door panel. The robot starts at the
+    # origin facing +X, so the door plane is placed in front of it at x=0.75 m.
+    contact_parameters = {
+        "friction": MUJOCO_CONTACT_FRICTION,
+        "condim": "3",
+        "solref": "0.005 1",
+        "solimp": "0.95 0.99 0.001",
+    }
+    for name, pos, size in (
+        ("door_frame_left", "0.75 0.93 0.73", "0.06 0.45 0.73"),
+        ("door_frame_right", "0.75 -0.93 0.73", "0.06 0.45 0.73"),
+        ("door_frame_header", "0.75 0 1.56", "0.06 0.48 0.10"),
+    ):
+        ET.SubElement(
+            worldbody,
+            "geom",
+            {
+                "name": name,
+                "type": "box",
+                "pos": pos,
+                "size": size,
+                "rgba": "0.45 0.46 0.46 1",
+                **contact_parameters,
+            },
+        )
+
+    door = ET.SubElement(
+        worldbody,
+        "body",
+        {
+            "name": "sim2sim_door",
+            "pos": "0.75 0.45 0.02",
+        },
+    )
+    ET.SubElement(
+        door,
+        "inertial",
+        {
+            "pos": "0 -0.445 0.70",
+            "mass": "8.25",
+            "diaginertia": "1.78 1.28 0.53",
+        },
+    )
+    ET.SubElement(
+        door,
+        "joint",
+        {
+            "name": "sim2sim_door_hinge",
+            "type": "hinge",
+            "axis": "0 0 1",
+            "limited": "true",
+            "range": "-1.75 1.75",
+            "damping": "1.0",
+            "frictionloss": "0.2",
+            "armature": "0.01",
+        },
+    )
+    ET.SubElement(
+        door,
+        "geom",
+        {
+            "name": "sim2sim_door_panel",
+            "type": "box",
+            "pos": "0 -0.44 0.69",
+            "size": "0.025 0.44 0.69",
+            "rgba": "0.45 0.18 0.055 1",
+            **contact_parameters,
+        },
+    )
+    ET.SubElement(
+        door,
+        "geom",
+        {
+            "name": "sim2sim_door_handle_shaft",
+            "type": "cylinder",
+            "pos": "-0.075 -0.75 1.02",
+            "quat": "0.7071068 0 0.7071068 0",
+            "size": "0.022 0.05",
+            "rgba": "0.12 0.12 0.12 1",
+            **contact_parameters,
+        },
+    )
+    ET.SubElement(
+        door,
+        "geom",
+        {
+            "name": "sim2sim_door_handle_knob",
+            "type": "sphere",
+            "pos": "-0.135 -0.75 1.02",
+            "size": "0.032",
+            "rgba": "0.12 0.12 0.12 1",
+            **contact_parameters,
+        },
+    )
+
     # A collision-free mocap body renders the full target pose instead of only
     # a position sphere. Local +X/+Y/+Z are red/green/blue respectively.
     target_frame = ET.Element(
@@ -512,6 +678,57 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
             },
         )
     worldbody.insert(2, target_frame)
+
+    # Render the measured eef_link pose with the same RGB coordinate frame as
+    # the command target. Sites are visual only and move with eef_link.
+    eef_frame = worldbody.find(".//body[@name='eef_link']")
+    if eef_frame is None:
+        raise ValueError("eef_link body is missing from MJCF")
+    ET.SubElement(
+        eef_frame,
+        "site",
+        {
+            "name": "current_eef",
+            "type": "sphere",
+            "size": "0.012",
+            "rgba": "1 1 1 0.9",
+            "group": "0",
+        },
+    )
+    for name, endpoint, color in (
+        ("current_eef_x", "0.16 0 0", "1 0.12 0.05 1"),
+        ("current_eef_y", "0 0.16 0", "0.1 0.9 0.2 1"),
+        ("current_eef_z", "0 0 0.16", "0.1 0.35 1 1"),
+    ):
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": name,
+                "type": "capsule",
+                "fromto": f"0 0 0 {endpoint}",
+                "size": "0.007",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": f"{name}_tip",
+                "type": "sphere",
+                "pos": endpoint,
+                "size": "0.014",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+
+    # assembly.urdf models the UMI gripper as fixed geometry attached to
+    # link6.  Do not inject the obsolete six-DoF DAS gripper at runtime: it
+    # would no longer match the trained robot or its eef_link frame.
+
     xml = ET.tostring(root, encoding="unicode")
     return mujoco.MjModel.from_xml_string(xml)
 
@@ -593,16 +810,16 @@ class ThreeOnnxPolicy:
         return np.clip(action, -100.0, 100.0)
 
 
-class KeyboardTargetController:
-    """Thread-safe target deltas produced by the MuJoCo viewer callback."""
+class TerminalKeyboardController:
+    """Read target commands directly from the launching terminal."""
 
     KEY_DELTAS = {
-        ord("W"): np.array([1.0, 0.0, 0.0]),
-        ord("S"): np.array([-1.0, 0.0, 0.0]),
-        ord("A"): np.array([0.0, 1.0, 0.0]),
-        ord("D"): np.array([0.0, -1.0, 0.0]),
-        ord("R"): np.array([0.0, 0.0, 1.0]),
-        ord("F"): np.array([0.0, 0.0, -1.0]),
+        "W": np.array([1.0, 0.0, 0.0]),
+        "S": np.array([-1.0, 0.0, 0.0]),
+        "A": np.array([0.0, 1.0, 0.0]),
+        "D": np.array([0.0, -1.0, 0.0]),
+        "R": np.array([0.0, 0.0, 1.0]),
+        "F": np.array([0.0, 0.0, -1.0]),
     }
 
     def __init__(self, step: float):
@@ -611,23 +828,87 @@ class KeyboardTargetController:
         self.step = float(step)
         self._pending_delta = np.zeros(3, dtype=np.float64)
         self._print_requested = False
+        self._gripper_command: float | None = None
+        self._quit_requested = False
         self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._fd: int | None = None
+        self._saved_terminal_settings = None
+        self._thread: threading.Thread | None = None
 
-    def callback(self, keycode: int) -> None:
+    def start(self) -> bool:
+        """Enter cbreak mode so each terminal key is available immediately."""
+        if not sys.stdin.isatty():
+            print("[keyboard] stdin 不是终端；终端监听已禁用，MuJoCo 窗口键盘控制仍可用。")
+            return False
+        self._fd = sys.stdin.fileno()
+        self._saved_terminal_settings = termios.tcgetattr(self._fd)
+        tty.setcbreak(self._fd)
+        self._thread = threading.Thread(
+            target=self._read_loop,
+            name="sim2sim-terminal-keyboard",
+            daemon=True,
+        )
+        self._thread.start()
+        return True
+
+    def _read_loop(self) -> None:
+        assert self._fd is not None
+        while not self._stop.is_set():
+            try:
+                readable, _, _ = select.select([self._fd], [], [], 0.1)
+                if not readable:
+                    continue
+                raw_key = os.read(self._fd, 1)
+            except OSError:
+                break
+            if not raw_key:
+                break
+            self._queue_key(raw_key.decode(errors="ignore"))
+
+    def _queue_key(self, key: str) -> None:
+        """Queue one target-control key from either terminal or viewer."""
+        key = key.upper()
         with self._lock:
-            direction = self.KEY_DELTAS.get(keycode)
+            direction = self.KEY_DELTAS.get(key)
             if direction is not None:
                 self._pending_delta += direction * self.step
-            elif keycode == ord("P"):
+            elif key == "P":
                 self._print_requested = True
+            elif key == "O":
+                self._gripper_command = 0.0
+            elif key == "C":
+                self._gripper_command = 1.0
+            elif key == "Q":
+                self._quit_requested = True
 
-    def consume(self) -> tuple[np.ndarray, bool]:
+    def viewer_key_callback(self, keycode: int) -> None:
+        """Receive GLFW key codes while the MuJoCo viewer has focus."""
+        if 0 <= keycode <= 0x10FFFF:
+            self._queue_key(chr(keycode))
+
+    def consume(self) -> tuple[np.ndarray, bool, float | None, bool]:
         with self._lock:
             delta = self._pending_delta.copy()
             print_requested = self._print_requested
+            gripper_command = self._gripper_command
+            quit_requested = self._quit_requested
             self._pending_delta.fill(0.0)
             self._print_requested = False
-        return delta, print_requested
+            self._gripper_command = None
+        return delta, print_requested, gripper_command, quit_requested
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+        if self._fd is not None and self._saved_terminal_settings is not None:
+            termios.tcsetattr(
+                self._fd,
+                termios.TCSADRAIN,
+                self._saved_terminal_settings,
+            )
+            self._saved_terminal_settings = None
 
 
 class Sim2Sim:
@@ -662,9 +943,10 @@ class Sim2Sim:
         )
         if np.any(self.motor_ids < 0):
             raise ValueError("One or more joint motors are missing from the MJCF")
+        self.gripper_command = 0.0
 
         self.base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
-        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "link6")
+        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "eef_link")
         self.target_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "command_target")
         target_frame_body_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_BODY, "command_target_frame"
@@ -685,7 +967,7 @@ class Sim2Sim:
         mujoco.mj_resetData(model, self.data)
         root_adr = model.joint("root").qposadr[0]
         self.data.qpos[root_adr : root_adr + 7] = [0.0, 0.0, base_height, 1.0, 0.0, 0.0, 0.0]
-        self.data.qpos[self.joint_qpos_adr] = DEFAULT_JOINT_POS
+        self.data.qpos[self.joint_qpos_adr] = ISAAC_RESET_JOINT_POS
         self.data.qvel[:] = 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(model, self.data)
@@ -693,7 +975,15 @@ class Sim2Sim:
         self.raw_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.effective_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.last_action = np.zeros(ACTION_DIM, dtype=np.float64)
-        self.last_torque = np.zeros(ACTION_DIM, dtype=np.float64)
+        # Before the first action is processed, IsaacLab's implicit actuators
+        # still have zero position targets.  Its initial applied_torque history
+        # is therefore KP * (0 - q_reset), notably J2=-9 and J3=-1.17 Nm.
+        # Seed all ten contactNet frames with the same reset-time semantics.
+        self.last_torque = np.clip(
+            -KP * ISAAC_RESET_JOINT_POS,
+            -TORQUE_LIMIT,
+            TORQUE_LIMIT,
+        )
         self.raw_desired_position = DEFAULT_JOINT_POS.copy()
         self.policy_desired_position = DEFAULT_JOINT_POS.copy()
         self.desired_position = DEFAULT_JOINT_POS.copy()
@@ -829,6 +1119,14 @@ class Sim2Sim:
             self.se3_distance_reference = self._initial_se3_distance()
         self._update_target_marker()
 
+    def set_gripper_command(self, command: float) -> None:
+        """Keep keyboard compatibility; the URDF gripper itself is fixed."""
+        self.gripper_command = float(np.clip(command, 0.0, 1.0))
+
+    def gripper_position(self) -> float:
+        """The current URDF has no gripper DoF."""
+        return 0.0
+
     def infer(self) -> None:
         contact_obs = self.contact_observation()
         self.history.append(contact_obs)
@@ -839,12 +1137,13 @@ class Sim2Sim:
     def apply_pd(self, *, policy_updated: bool = False) -> None:
         position, velocity = self.joint_state()
         if policy_updated:
-            # Same torque-aware action clamp used by SolefootController.cpp.
-            action_min = position - DEFAULT_JOINT_POS + (KD * velocity - TORQUE_LIMIT) / KP
-            action_max = position - DEFAULT_JOINT_POS + (KD * velocity + TORQUE_LIMIT) / KP
-            self.effective_action = np.clip(self.raw_action, action_min, action_max)
+            # Match IsaacLab's JointPositionAction + ImplicitActuator chain:
+            # keep the raw position target for the full policy interval and
+            # saturate only the resulting PD torque below.  Pre-clipping the
+            # position target changes both the closed-loop dynamics and the
+            # last_action observation seen by the policy.
             self.raw_desired_position = DEFAULT_JOINT_POS + self.raw_action
-            self.policy_desired_position = DEFAULT_JOINT_POS + self.effective_action
+            self.policy_desired_position = self.raw_desired_position.copy()
 
             command = self.policy_desired_position.copy()
             if self.arm_max_step > 0.0:
@@ -860,11 +1159,12 @@ class Sim2Sim:
                     self._previous_policy_command[LEG_IDS] + self.max_leg_step,
                 )
             self.desired_position = command
+            self.effective_action = command - DEFAULT_JOINT_POS
             self.policy_command_step = command - self._previous_policy_command
             self._previous_policy_command = command.copy()
-            # The policy observes the command that was actually applied, just
-            # like record_applied_targets() in the real deployment script.
-            self.last_action = command - DEFAULT_JOINT_POS
+            # mdp.last_action in IsaacLab exposes the raw action-manager input,
+            # not a torque-aware or rate-limited target.
+            self.last_action = self.raw_action.copy()
 
         torque = KP * (self.desired_position - position) - KD * velocity
         torque = np.clip(torque, -TORQUE_LIMIT, TORQUE_LIMIT)
@@ -963,7 +1263,7 @@ def run(args: argparse.Namespace) -> None:
         args.arm_max_step,
         args.max_leg_step,
     )
-    keyboard = KeyboardTargetController(args.keyboard_step)
+    keyboard = TerminalKeyboardController(args.keyboard_step)
 
     if args.duration is None:
         if trajectory is None:
@@ -990,7 +1290,13 @@ def run(args: argparse.Namespace) -> None:
         last_log_sim = simulation.data.time
         viewer_sync_count = 0
         while physics_step < max_steps and (viewer_handle is None or viewer_handle.is_running()):
-            target_delta, print_target = keyboard.consume()
+            target_delta, print_target, gripper_command, quit_requested = keyboard.consume()
+            if quit_requested:
+                print("\n[keyboard] 终端请求退出。")
+                break
+            if gripper_command is not None:
+                simulation.set_gripper_command(gripper_command)
+                print("[keyboard] 当前 URDF 将夹爪建模为固定几何，O/C 不改变模型。")
             if np.any(target_delta):
                 if trajectory is not None:
                     trajectory.translate_offset(target_delta)
@@ -1036,7 +1342,8 @@ def run(args: argparse.Namespace) -> None:
                     f"t={simulation.data.time:7.2f}s  RTF={rtf:5.3f}{viewer_text}  "
                     f"base_z={base_z:6.3f}  "
                     f"EE误差={pos_error:6.3f}m/{rot_error:6.3f}rad  "
-                    f"|action|max={np.max(np.abs(simulation.last_action)):6.3f}"
+                    f"|action|max={np.max(np.abs(simulation.last_action)):6.3f}  "
+                    "gripper=fixed"
                 )
                 if args.leg_debug:
                     joint_position, _ = simulation.joint_state()
@@ -1065,29 +1372,36 @@ def run(args: argparse.Namespace) -> None:
                 last_log_sim = simulation.data.time
                 viewer_sync_count = 0
 
+    print(
+        "[keyboard] MuJoCo 窗口或终端均可控制：W/S = ±X，A/D = ±Y，R/F = ±Z，"
+        f"P = 显示坐标，Q = 退出；"
+        f"步长 {args.keyboard_step:g} m"
+    )
+    keyboard.start()
     try:
-        if args.headless:
-            if run_duration <= 0:
-                raise ValueError("--headless requires --duration greater than zero")
-            loop()
-        else:
-            import mujoco.viewer
+        try:
+            if args.headless:
+                if run_duration <= 0:
+                    raise ValueError("--headless requires --duration greater than zero")
+                loop()
+            else:
+                import mujoco.viewer
 
-            print(
-                "[keyboard] 移动目标点：W/S = ±X，A/D = ±Y，R/F = ±Z，"
-                f"P = 显示坐标；步长 {args.keyboard_step:g} m"
-            )
-            with mujoco.viewer.launch_passive(
-                model, simulation.data, key_callback=keyboard.callback
-            ) as viewer_handle:
-                configure_viewer(
-                    viewer_handle,
-                    simulation.base_body_id,
-                    track_robot=not args.free_camera,
-                )
-                loop(viewer_handle)
-    except KeyboardInterrupt:
-        print("\n[sim2sim] 用户停止。")
+                with mujoco.viewer.launch_passive(
+                    model,
+                    simulation.data,
+                    key_callback=keyboard.viewer_key_callback,
+                ) as viewer_handle:
+                    configure_viewer(
+                        viewer_handle,
+                        simulation.base_body_id,
+                        track_robot=not args.free_camera,
+                    )
+                    loop(viewer_handle)
+        except KeyboardInterrupt:
+            print("\n[sim2sim] 用户停止。")
+    finally:
+        keyboard.close()
 
     pos_error, rot_error = simulation.error()
     ee_position, _ = simulation.ee_pose_base()

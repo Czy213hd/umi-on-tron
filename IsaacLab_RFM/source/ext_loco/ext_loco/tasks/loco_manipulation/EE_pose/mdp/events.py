@@ -124,7 +124,7 @@ def prepare_quantity_for_tron1_piper(
 
     arm_joint_idx, _ = asset.find_joints(r"J\d")
 
-    ee_link_idx, _ = asset.find_bodies("link6")
+    ee_link_idx, _ = asset.find_bodies("eef_link")
 
     base_idx, _ = asset.find_bodies("base_Link")
 
@@ -160,4 +160,3 @@ def prepare_quantity_for_tron1_piper(
     env._arm_joint_ids = arm_joint_idx                     # type: ignore
     env._ee_link_idx = ee_link_idx                         # type: ignore
     env._foot_radius = 0.127                               # type: ignore
-

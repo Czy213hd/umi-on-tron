@@ -65,7 +65,7 @@ class ImplicitOneStageRunnerCfg(RslRlOnPolicyRunnerCfg):
     # gru_update_interval = 4
     num_steps_per_env = 24
     max_iterations = 20000
-    save_interval = 200
+    save_interval = 1000
     experiment_name = "ImplicitOneStageARXR5Arm"
     # experiment_name = "ImplicitOneStage"
     empirical_normalization = True

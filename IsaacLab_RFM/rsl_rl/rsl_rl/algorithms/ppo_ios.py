@@ -50,6 +50,7 @@ class PPO_IOS(PPO):
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        self.initial_learning_rate = learning_rate
         self.tf_gru_lr = learning_rate
         self.next_obs_latent_dim = next_obs_latent_dim
         # PPO components
@@ -289,7 +290,7 @@ class PPO_IOS(PPO):
         for param_group in self.tf_gru_optimizer.param_groups:
             param_group["lr"] = self.tf_gru_lr
         for param_group in self.ppo_optimizer.param_groups:
-            param_group["lr"] = self.tf_gru_lr
+            param_group["lr"] = self.learning_rate
 
         if self.flow_matching:
             actor_input = mini_batch["actor_inputs"].clone().detach()
@@ -352,6 +353,8 @@ class PPO_IOS(PPO):
     def _update_lr_kl(self, sigma_batch, old_sigma_batch, mu_batch, old_mu_batch):
         if self.desired_kl is not None and self.schedule == "adaptive":
             with torch.inference_mode():
+                sigma_batch = sigma_batch.clamp_min(1.0e-6)
+                old_sigma_batch = old_sigma_batch.clamp_min(1.0e-6)
                 kl = torch.sum(
                     torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
                     + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
@@ -361,12 +364,16 @@ class PPO_IOS(PPO):
                 )
                 kl_mean = torch.mean(kl)
 
-                # if kl_mean > self.desired_kl * 2.0:
-                #     self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                # elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                #     self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                # for param_group in self.ppo_optimizer.param_groups:
-                #     param_group["lr"] = self.learning_rate
+                if torch.isfinite(kl_mean):
+                    if kl_mean > self.desired_kl * 2.0:
+                        self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
+                    elif 0.0 < kl_mean < self.desired_kl / 2.0:
+                        self.learning_rate = min(
+                            self.initial_learning_rate,
+                            self.learning_rate * 1.5,
+                        )
+                    for param_group in self.ppo_optimizer.param_groups:
+                        param_group["lr"] = self.learning_rate
                 return kl_mean
 
     def update_gru(self, rewards, next_critic_obs):
@@ -390,28 +397,55 @@ class PPO_IOS(PPO):
 
             # -- compute loss
             loss_item = self._compute_losses(mini_batch)
+            invalid_losses = [
+                name for name, loss in loss_item.items() if not torch.isfinite(loss).all()
+            ]
+            if invalid_losses:
+                self.tf_gru_optimizer.zero_grad()
+                self.ppo_optimizer.zero_grad()
+                raise FloatingPointError(
+                    f"Non-finite PPO losses at iteration {it}: {invalid_losses}. "
+                    "Optimizer step was skipped to preserve finite model weights."
+                )
 
             mse_loss = loss_item["lin_vel"] + loss_item["next_obs"] + self.beta * loss_item["beta_vae"]
-            # Gradient step
-            self.tf_gru_optimizer.zero_grad()
-            mse_loss.backward()
-            nn.utils.clip_grad_norm_(self.gru.parameters(), self.max_grad_norm)
-            nn.utils.clip_grad_norm_(self.tf_encoder.parameters(), self.max_grad_norm)
-            self.tf_gru_optimizer.step()
-
             ppo_loss = (
                 loss_item["surrogate"]
                 + self.value_loss_coef * loss_item["value"]
                 - self.entropy_coef * loss_item["entropy"]
-                + self.grad_coef * loss_item["grad_penalty"]
             )
-            # Gradient step
+            if self.grad_coef != 0.0:
+                # Avoid 0 * inf producing NaN when gradient-penalty logging is
+                # enabled but the penalty is not part of the optimization.
+                ppo_loss = ppo_loss + self.grad_coef * loss_item["grad_penalty"]
+
+            # Build and validate both gradient sets before either optimizer is
+            # allowed to mutate model weights.
+            self.tf_gru_optimizer.zero_grad()
             self.ppo_optimizer.zero_grad()
+            mse_loss.backward()
             ppo_loss.backward()
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+
+            grad_norms = {
+                "gru": nn.utils.clip_grad_norm_(self.gru.parameters(), self.max_grad_norm),
+                "tf_encoder": nn.utils.clip_grad_norm_(self.tf_encoder.parameters(), self.max_grad_norm),
+                "actor_critic": nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm),
+            }
+            invalid_gradients = [
+                name for name, norm in grad_norms.items() if not torch.isfinite(norm)
+            ]
+            if invalid_gradients:
+                self.tf_gru_optimizer.zero_grad()
+                self.ppo_optimizer.zero_grad()
+                raise FloatingPointError(
+                    f"Non-finite gradient norms at iteration {it}: {invalid_gradients}. "
+                    "Optimizer step was skipped to preserve finite model weights."
+                )
+
+            self.tf_gru_optimizer.step()
             self.ppo_optimizer.step()
             for key in loss_item:
-                accumulated_losses[key] += loss_item[key]
+                accumulated_losses[key] += loss_item[key].detach().item()
         self.storage.clear()
         num_updates = self.num_learning_epochs * self.num_mini_batches
         return {name: loss / num_updates for name, loss in accumulated_losses.items()}
