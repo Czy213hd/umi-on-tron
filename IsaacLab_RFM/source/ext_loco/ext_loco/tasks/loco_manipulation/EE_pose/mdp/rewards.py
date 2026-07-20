@@ -606,6 +606,45 @@ def feet_contacts_reg(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: Scen
     return reward_mani * (1 - env._loco_mani_scale) * position_scale
 
 
+def mani_feet_stable_exp(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    velocity_std: float,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="ankle_.*"),
+) -> torch.Tensor:
+    """Reward both feet being in contact and horizontally stationary during manipulation."""
+    if velocity_std <= 0.0:
+        raise ValueError(f"velocity_std must be positive, got {velocity_std}")
+
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    # Require both selected feet to have exceeded the contact-force threshold
+    # at least once in the sensor history window.
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    contact_force = torch.max(
+        torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1), dim=1
+    )[0]
+    both_feet_contact = torch.all(contact_force > threshold, dim=-1)
+
+    # A continuous kernel gives progressively more reward as both contacting
+    # feet approach zero horizontal velocity, avoiding a hard velocity cutoff.
+    foot_vel_xy = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
+    squared_speed_sum = torch.sum(torch.square(foot_vel_xy), dim=(1, 2))
+    stationary_scale = torch.exp(-squared_speed_sum / velocity_std**2)
+
+    ee_position_error = env.command_manager.get_term("EE_pose").metrics["position_error"]
+    position_scale = torch.exp(-ee_position_error / 0.5)
+
+    return (
+        both_feet_contact.float()
+        * stationary_scale
+        * (1 - env._loco_mani_scale)
+        * position_scale
+    )
+
+
 def fly_penalty(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     """Regulate feet contacts"""
     # extract the used quantities (to enable type-hinting)

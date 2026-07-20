@@ -348,7 +348,7 @@ class EventCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base_Link"),
             # "mass_distribution_params": (-5.0, 5.0),
-            "mass_distribution_params": (-0.5, 3.0),
+            "mass_distribution_params": (-3, 3),
             "operation": "add",
         },
     )
@@ -417,7 +417,7 @@ class EventCfg:
     #         ),
     #         # Randomize only the 6 arm joints around their default pose.
     #         "position_range": (-0.1, 0.1),
-    #         "velocity_range": (-0.2, 0.2),
+    #         "velocity_range": (-0.1, 0.1),
     #     },
     # )
 
@@ -426,7 +426,7 @@ class EventCfg:
         func=mdp.push_by_setting_velocity,
         mode="interval",
         interval_range_s=(10.0, 15.0),
-        params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (-0.05, 0.05)}}, #add z
+        params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (-0.1, 0.1)}}, #add z
     )
 
 
@@ -436,7 +436,7 @@ class RewardsCfg:
 
     # Safety
     safety_exp = RewTerm(
-        func=mdp.safety_reward_exp, weight=2, params={"base_height_target": 0.8, "std": math.sqrt(0.5)} #1
+        func=mdp.safety_reward_exp, weight=1.7, params={"base_height_target": 0.8, "std": math.sqrt(0.5)} #1
     )
     # pose_product = RewTerm(
     #     func=mdp.pose_product_reward,
@@ -445,16 +445,16 @@ class RewardsCfg:
     # )
     # EE Tracking
     track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=5, params={"command_name": "EE_pose", "std": math.sqrt(0.5)}) #2 #mani
-    track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=5.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)}) #3mani
+    track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=6.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)}) #3mani
     track_EE_pb = RewTerm(func=mdp.track_EE_pb, weight=10.0)#15 #locomani
-    track_EE_reference_exp = RewTerm(func=mdp.track_EE_reference_exp, weight=3, params={"std": math.sqrt(0.5), "init_value": 0.98})#1.5 #loco
+    track_EE_reference_exp = RewTerm(func=mdp.track_EE_reference_exp, weight=3.5, params={"std": math.sqrt(0.5), "init_value": 0.98})#1.5 #loco
 
     # Penalties
     # lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     # ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
     dof_weighted_torques_l2 = RewTerm(
         func=mdp.weighted_joint_torques_l2,
-        weight=-4.0e-5,
+        weight=-4.0e-4,#4e-5
         params={
             "torque_weight": {
                 "abad_L_Joint": 0.2,
@@ -531,19 +531,29 @@ class RewardsCfg:
     # base_height_l2 = RewTerm(func=mdp.base_height_l2, weight=0.0, params={"target_height": 0.3})
     body_ee_alignment = RewTerm(
         func=mdp.body_ee_alignment,
-        weight=-1.5,
+        weight=-1.5,#-1.5
         params={"joint_names": ["J1", "J5"]},
     )
     # base_bidirectional_target_alignment = RewTerm(
     #     func=mdp.base_bidirectional_target_alignment,
-    #     weight=-2.0,
+    #     weight=-1.0,
     #     params={"command_name": "EE_pose", "min_target_distance": 0.1},
     # )
     feet_contacts_reg = RewTerm(
         func=mdp.feet_contacts_reg,
-        weight=0.5,
+        weight=1,#0.5
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"), "threshold": 5.0},
-    )
+    # )
+    # mani_feet_stable_exp = RewTerm(
+        # func=mdp.mani_feet_stable_exp,
+        # weight=2,
+        # params={
+        #     "asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*"),
+        #     "sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"),
+        #     "threshold": 5.0,
+        #     "velocity_std": 0.05,
+        # },
+    )#new
     foot_flat_l2 = RewTerm(
         func=mdp.foot_flat_l2,
         weight=-3.0,#-2
@@ -564,14 +574,14 @@ class RewardsCfg:
         params={"min_distance": 0.2, "body_names": ("ankle_L_Link", "ankle_R_Link"), "axis": "y"},
     )
 
-    # base_height = RewTerm(
-    #     func=mdp.base_height_rough_l2,
-    #     weight=-2.0,
-    #     params={"target_height": 0.8, "sensor_cfg": SceneEntityCfg("height_scanner")},
-    # )
+    base_height = RewTerm(
+        func=mdp.base_height_rough_l2,
+        weight=-0.5,#-2
+        params={"target_height": 0.8, "sensor_cfg": SceneEntityCfg("height_scanner")},
+    )
 
     termination_penalty = RewTerm(func=mdp.is_terminated, weight=-1000)
-    # alive = RewTerm(func=mdp.stay_alive, weight=2.0)
+    alive = RewTerm(func=mdp.stay_alive, weight=2.0)
 
 
 @configclass
@@ -634,7 +644,7 @@ class CurriculumCfg:
     orient_commands_ranges_level = CurrTerm(
         func=mdp.orient_commands_ranges_level, # type: ignore
         params={
-            "update_interval": 80 * 1,  # 80 iterations * 24 steps per iteration
+            "update_interval": 80 * 20,  # 80 iterations * 24 steps per iteration
             "command_name": "EE_pose",
         },
     )

@@ -101,24 +101,27 @@ def pos_commands_ranges_level(
     """
     # extract the used quantities (to enable type-hinting)
     command_cfg: mdp.UniformPoseCommandCfg = env.command_manager.get_term(command_name).cfg
-    x = command_cfg.ranges.pos_x[1]
+    x_low, x_high = command_cfg.ranges.pos_x
+    y_low, y_high = command_cfg.ranges.pos_y
     if env.common_step_counter % update_interval == 0:
-        x = command_cfg.ranges.pos_x[1] + 0.04
-        y = command_cfg.ranges.pos_y[1] + 0.04
+        # Expand mostly in the robot-forward (+X) direction.  Keep a smaller
+        # rear range for recovery, and grow the lateral range slowly.
+        x_low = max(x_low - 0.01, max_range["pos_x"][0])
+        x_high = min(x_high + 0.04, max_range["pos_x"][1])
+        y_low = max(y_low - 0.01, max_range["pos_y"][0])
+        y_high = min(y_high + 0.01, max_range["pos_y"][1])
         z_low, z_high = (
             command_cfg.ranges.pos_z[0] - 0.004,
             command_cfg.ranges.pos_z[1] + 0.004,
         )
-        x = min(x, max_range["pos_x"][1])
-        y = min(y, max_range["pos_y"][1])
         z_low = max(z_low, max_range["pos_z"][0])
         z_high = min(z_high, max_range["pos_z"][1])
-        command_cfg.ranges.pos_x = (-x, x)
-        command_cfg.ranges.pos_y = (-y, y)
+        command_cfg.ranges.pos_x = (x_low, x_high)
+        command_cfg.ranges.pos_y = (y_low, y_high)
         command_cfg.ranges.pos_z = (z_low, z_high)
 
     # return the mean terrain level
-    return torch.ones(1, dtype=torch.float) * x
+    return torch.ones(1, dtype=torch.float) * x_high
 
 
 def orient_commands_ranges_level(

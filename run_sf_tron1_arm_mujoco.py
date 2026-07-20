@@ -507,8 +507,48 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
         ET.SubElement(
             visual,
             "headlight",
-            {"diffuse": "0.7 0.7 0.7", "ambient": "0.25 0.25 0.25", "specular": "0.2 0.2 0.2"},
+            {"diffuse": "0.75 0.75 0.75", "ambient": "0.22 0.22 0.22", "specular": "0.6 0.6 0.6"},
         )
+
+    # A fine checker texture reads as a metric grid in the viewer.  Material
+    # reflectance is intentionally visual-only; contact friction is configured
+    # independently on the floor geom below.
+    asset = root.find("asset")
+    if asset is None:
+        asset = ET.Element("asset")
+        worldbody_index = next(
+            (index for index, element in enumerate(root) if element.tag == "worldbody"),
+            len(root),
+        )
+        root.insert(worldbody_index, asset)
+    ET.SubElement(
+        asset,
+        "texture",
+        {
+            "name": "sim2sim_grid_texture",
+            "type": "2d",
+            "builtin": "checker",
+            "mark": "edge",
+            "rgb1": "0.08 0.10 0.13",
+            "rgb2": "0.30 0.34 0.40",
+            "markrgb": "0.72 0.78 0.86",
+            "width": "1024",
+            "height": "1024",
+        },
+    )
+    ET.SubElement(
+        asset,
+        "material",
+        {
+            "name": "sim2sim_grid_material",
+            "texture": "sim2sim_grid_texture",
+            "texrepeat": "12 12",
+            "texuniform": "true",
+            "reflectance": "0.45",
+            "specular": "0.8",
+            "shininess": "0.55",
+        },
+    )
 
     worldbody = root.find("worldbody")
     if worldbody is None:
@@ -549,7 +589,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
                 "name": "sim2sim_floor",
                 "type": "plane",
                 "size": "0 0 0.1",
-                "rgba": "0.32 0.35 0.38 1",
+                "material": "sim2sim_grid_material",
                 "friction": "0.8 0.6 0.001",
                 "condim": "3",
                 "solref": "0.005 1",
