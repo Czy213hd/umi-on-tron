@@ -9,10 +9,7 @@ IsaacLab_RFM/logs/
 IsaacLab_RFM/outputs/
 IsaacLab_RFM/wandb/
 
-# ── 服务器本地多 GPU sweep 工具 ─────────────────────────────
-# 仅用于当前四卡服务器；本机单卡训练不需要同步这些文件。
-/IsaacLab_RFM/scripts/rsl_rl/launch_4gpu_reward_sweep.sh
-/IsaacLab_RFM/scripts/rsl_rl/launch_4gpu_reward_sweep_GUIDE.md
+# 多 GPU sweep 脚本和使用指南属于项目源码，需要提交到 Git。
 /IsaacLab_RFM/scripts/rsl_rl/tea_debug.log
 
 # ── IsaacLab 数据文件（pkl 轨迹体积大，建议单独管理）────────
@@ -27,6 +24,7 @@ IsaacLab_RFM/source/ext_loco/ext_loco/assets/SF_TRON1A_ARXR5ARM/assembly/
 tron1_ws/src/tron1-rl-deploy-arm/src/robot-description/pointfoot/SF_TRON1A_ARXR5ARM/assembly/
 
 # ── Python 缓存 ──────────────────────────────────────────────
+.venv/
 __pycache__/
 *.py[cod]
 *.pyo
