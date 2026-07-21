@@ -611,6 +611,21 @@ def foot_flat_l2(
     )
 
 
+def foot_slip_l2(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize horizontal foot velocity while the foot is in contact."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    net_contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids]
+    is_contact = torch.max(torch.norm(net_contact_forces, dim=-1), dim=1)[0] > threshold
+    foot_vel_xy = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
+    return torch.sum(torch.square(torch.norm(foot_vel_xy, dim=-1)) * is_contact, dim=1)
+
+
 def _walking_gate(
     env: ManagerBasedRLEnv,
     command_name: str = "EE_pose",
