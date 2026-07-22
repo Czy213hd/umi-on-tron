@@ -11,6 +11,8 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 PYTHON_BIN="$(command -v "${PYTHON_BIN:-python}")"
 STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-60}"
 task="Template-Isaac-EEPose-Flat-Limx-SF-Tron1A-v0"
+resume_run="2026-07-19_23-46-01_reward_set_gpu1_20260719_234554"
+resume_checkpoint="model_9000.pt"
 
 foreground=false
 if [[ "${1:-}" == "--foreground" ]]; then
@@ -116,18 +118,25 @@ preflight
 
 # One reward configuration per physical GPU. Edit these rows before launching.
 #                        GPU 0  GPU 1  GPU 2  GPU 3
-position_weights=(        4.0    4.0    4.0    2.0 )
-orientation_weights=(     5.0    5.0    5.0    3.0 )
+position_weights=(        3.0    4.0    3.0    3.0 )
+orientation_weights=(     3.0    5.0    3.0    3.0 )
 pb_weights=(             15.0   15.0   15.0   20.0 )
-reference_weights=(       1.0    2.0    3.0    5.0 )
+reference_weights=(       5.0    5.0    5.0    5.0 )
 action_weights=(         -1.0   -1.0   -1.0   -1.0 )
-foot_slip_weights=(     -10.0  -10.0  -10.0  -10.0 )
-safety_weights=(          1.0    1.0    1.0    1.0 )
+foot_slip_weights=(      -2.0   -2.0   -2.0   -2.0 )
+foot_contacts_reg=(       0.5    0.5    0.5    0.5 )
+safety_weights=(          3.0    3.0    2.0    3.0 )
 
 num_envs=8192
 max_iterations=10000
 console_log_dir="${WBC_LOG_ROOT}/launcher_${launch_stamp}"
 pids=()
+
+resume_path="${WBC_LOG_ROOT}/${resume_run}/${resume_checkpoint}"
+if [[ ! -f "${resume_path}" ]]; then
+    echo "ERROR: Resume checkpoint does not exist: ${resume_path}" >&2
+    exit 1
+fi
 
 if [[ -e "${console_log_dir}" ]] || find "${WBC_LOG_ROOT}" -mindepth 1 -maxdepth 1 -name "*_${launch_stamp}" -print -quit 2>/dev/null | grep -q .; then
     echo "ERROR: Launch stamp ${launch_stamp} already has logs; choose a new stamp." >&2
@@ -165,7 +174,8 @@ for gpu in 0 1 2 3; do
 
     echo "Launching ${run_name} on physical GPU ${gpu}"
     echo "  position=${position_weights[$gpu]}, orientation=${orientation_weights[$gpu]}, pb=${pb_weights[$gpu]}, reference=${reference_weights[$gpu]}"
-    echo "  action_rate=${action_weights[$gpu]}, foot_slip=${foot_slip_weights[$gpu]}, safety=${safety_weights[$gpu]}"
+    echo "  action_rate=${action_weights[$gpu]}, foot_slip=${foot_slip_weights[$gpu]}, foot_contacts=${foot_contacts_reg[$gpu]}, safety=${safety_weights[$gpu]}"
+    echo "  resume=${resume_path}"
     echo "  usd_dir=${usd_dir}"
     echo "  console=${console_log}"
 
@@ -180,6 +190,9 @@ for gpu in 0 1 2 3; do
             --asset_usd_dir="${usd_dir}" \
             --num_envs="${num_envs}" \
             --max_iterations="${max_iterations}" \
+            --resume=True \
+            --load_run="${resume_run}" \
+            --checkpoint="${resume_checkpoint}" \
             --logger=wandb \
             "env.rewards.track_EE_position_exp.weight=${position_weights[$gpu]}" \
             "env.rewards.track_EE_orientation_exp.weight=${orientation_weights[$gpu]}" \
@@ -187,6 +200,7 @@ for gpu in 0 1 2 3; do
             "env.rewards.track_EE_reference_exp.weight=${reference_weights[$gpu]}" \
             "env.rewards.action_rate_l2.weight=${action_weights[$gpu]}" \
             "env.rewards.foot_slip_l2.weight=${foot_slip_weights[$gpu]}" \
+            "env.rewards.feet_contacts_reg.weight=${foot_contacts_reg[$gpu]}" \
             "env.rewards.safety_exp.weight=${safety_weights[$gpu]}" \
             "agent.wandb_run_name=${run_name}"
     ) >"${console_log}" 2>&1 &

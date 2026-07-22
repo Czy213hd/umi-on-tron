@@ -86,10 +86,12 @@ def main():
     env_cfg.seed = agent_cfg.seed
 
     # specify directory for logging experiments
-    # Match ios_train.py so that new runs saved on the external log drive can
-    # be found by play/resume without copying checkpoints back into the repo.
+    # Match ios_train.py so that play/resume finds repository-local runs by
+    # default while still allowing WBC_LOG_ROOT to select another location.
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    default_log_root = os.path.join(os.path.dirname(os.path.dirname(script_dir)), "logs", "rsl_rl")
     log_root_path = os.path.abspath(
-        os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs")
+        os.environ.get("WBC_LOG_ROOT", default_log_root)
     )
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)

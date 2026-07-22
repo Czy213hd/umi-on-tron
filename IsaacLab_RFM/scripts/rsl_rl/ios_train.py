@@ -105,12 +105,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
+    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
     # specify directory for logging experiments
-    # Keep full training runs on the external log drive by default.  Set
-    # WBC_LOG_ROOT to override this location for a different machine.
+    # Keep logs in the repository by default so the script is portable across
+    # machines. Set WBC_LOG_ROOT to use a different location.
+    default_log_root = os.path.join(os.path.dirname(os.path.dirname(_script_dir)), "logs", "rsl_rl")
     log_root_path = os.path.abspath(
-        os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs")
+        os.environ.get("WBC_LOG_ROOT", default_log_root)
     )
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs: {time-stamp}_{run_name}

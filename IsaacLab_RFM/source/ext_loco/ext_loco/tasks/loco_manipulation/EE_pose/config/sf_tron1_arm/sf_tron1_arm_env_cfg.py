@@ -640,14 +640,14 @@ class CurriculumCfg:
         func=mdp.pos_commands_ranges_level,  # type: ignore
         params={
             "max_range": {"pos_x": (-3.5, 3.5), "pos_y": (-3.5, 3.5), "pos_z": (0.1, 2.0)},
-            "update_interval": 20 * 24,  # 80 iterations * 24 steps per iteration
+            "update_interval": 60 * 24,  # 80 iterations * 24 steps per iteration
             "command_name": "EE_pose",
         },
     )
     orient_commands_ranges_level = CurrTerm(
         func=mdp.orient_commands_ranges_level, # type: ignore
         params={
-            "update_interval": 20 * 24,  # 80 iterations * 24 steps per iteration
+            "update_interval": 60 * 24,  # 80 iterations * 24 steps per iteration
             "command_name": "EE_pose",
         },
     )
