@@ -46,8 +46,8 @@ DEPLOYED_MODEL_DIR = (
 )
 WBC_LOG_ROOT = Path(os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs"))
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
-# The trained task tracks the URDF's eef_link directly.  It is already the
-# UMI gripper-base frame, so the former link6 -> tip conversion must not run.
+# The trained task tracks DAS_Controller_V3_with_flange/base_link, uniquely
+# named das_base_link in the combined robot asset. No tip offset is applied.
 TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
 TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
 
@@ -107,22 +107,25 @@ TORQUE_LIMIT = np.array(
     [80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 18.0, 40.0, 40.0, 18.0, 18.0, 3.0, 3.0, 3.0],
     dtype=np.float64,
 )
+VELOCITY_LIMIT = np.array(
+    [20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 3.14, 40.0, 40.0, 3.14, 3.14, 3.9, 3.9, 3.9],
+    dtype=np.float64,
+)
 
-# MuJoCo needs a finer contact step than the source PhysX simulation to keep
-# the detailed ankle meshes from visibly tunnelling into the floor. The policy
-# frequency remains identical to training: 0.001 * 20 = 0.02 s (50 Hz).
-PHYSICS_DT = 0.001
-POLICY_DECIMATION = 20
-POLICY_DT = PHYSICS_DT * POLICY_DECIMATION
+# The policy clock must match training exactly (50 Hz). MuJoCo defaults to a
+# finer 1 ms contact substep because its mesh contact becomes unstable at the
+# PhysX training step of 5 ms. Use --physics-dt 0.005 for strict clock tests.
+TRAINING_PHYSICS_DT = 0.005
+DEFAULT_PHYSICS_DT = 0.001
+POLICY_DT = 0.02
 HISTORY_LENGTH = 10
 OBS_DIM = 65
 CONTACT_OBS_DIM = 55
 ACTION_DIM = 14
-# MuJoCo's friction tuple is (sliding, torsional, rolling); it does not expose
-# separate static and dynamic coefficients.  Use the IsaacLab terrain's nominal
-# coefficient for deterministic sim2sim evaluation.  Training randomization is
-# configured independently in the IsaacLab environment and is not changed here.
-MUJOCO_CONTACT_FRICTION = "1.0 0.005 0.0001"
+# A single MuJoCo sliding coefficient cannot represent PhysX's independent
+# static [0.6, 1.0] and dynamic [0.4, 0.9] randomization. 0.9 lies in both
+# training ranges and is therefore the deterministic parity value.
+MUJOCO_CONTACT_FRICTION = "0.9 0.005 0.0001"
 
 
 def format_named(names: tuple[str, ...], values: np.ndarray) -> str:
@@ -150,6 +153,16 @@ def parse_args() -> argparse.Namespace:
         default="world",
         help="Frame of --command (default: world).",
     )
+    parser.add_argument(
+        "--eef-x-offset",
+        type=float,
+        default=None,
+        help=(
+            "Override --command with a fixed world-frame target whose position is the "
+            "initial gripper-base/camera-center position plus this many metres along world +X; preserve "
+            "the initial EEF orientation."
+        ),
+    )
     parser.add_argument("--mjcf", type=Path, default=DEFAULT_MJCF)
     parser.add_argument(
         "--model-dir",
@@ -162,7 +175,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Simulation duration in seconds; 0 runs until the viewer closes. "
-        "Default: 30 s manually, or one complete trajectory.",
+        "Default: the 10 s training episode manually, or one complete trajectory.",
     )
     parser.add_argument(
         "--base-height",
@@ -171,10 +184,33 @@ def parse_args() -> argparse.Namespace:
         help="Initial base_Link height in metres (default: 0.8, matching IsaacLab play).",
     )
     parser.add_argument(
-        "--sample-latent",
-        action="store_true",
-        help="Sample the predicted latent distribution instead of using its mean.",
+        "--physics-dt",
+        type=float,
+        default=DEFAULT_PHYSICS_DT,
+        help="MuJoCo substep in seconds (default: 0.001 for stable mesh contact; "
+        "use 0.005 to match the IsaacLab physics clock exactly).",
     )
+    parser.add_argument(
+        "--se3-decrease-vel",
+        type=float,
+        default=1.0,
+        help="SE(3) reference decay rate. Training samples [0.5, 1.4] per command; "
+        "1.0 is the deterministic training-domain value, while 0 matches fixed Command-Play.",
+    )
+    latent_group = parser.add_mutually_exclusive_group()
+    latent_group.add_argument(
+        "--sample-latent",
+        dest="sample_latent",
+        action="store_true",
+        help="Sample the predicted latent distribution (default; matches training/Isaac play).",
+    )
+    latent_group.add_argument(
+        "--mean-latent",
+        dest="sample_latent",
+        action="store_false",
+        help="Use the latent mean for deterministic diagnostics (not training parity).",
+    )
+    parser.set_defaults(sample_latent=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-realtime", action="store_true")
@@ -188,6 +224,11 @@ def parse_args() -> argparse.Namespace:
         "--free-camera",
         action="store_true",
         help="Use a stationary free camera instead of following base_Link.",
+    )
+    parser.add_argument(
+        "--door",
+        action="store_true",
+        help="Add the deployment door scene. Disabled by default to match the flat training scene.",
     )
     parser.add_argument(
         "--keyboard-step",
@@ -430,7 +471,12 @@ class PickleTrajectory:
             self.finished_message_printed = True
 
 
-def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
+def load_sim_model(
+    mjcf_path: Path,
+    *,
+    physics_dt: float = DEFAULT_PHYSICS_DT,
+    add_door: bool = False,
+) -> mujoco.MjModel:
     """Add a floor and target marker without changing the robot MJCF on disk."""
     mjcf_path = mjcf_path.expanduser().resolve()
     if not mjcf_path.is_file():
@@ -447,13 +493,20 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
     option = root.find("option")
     if option is None:
         option = ET.SubElement(root, "option")
-    option.set("timestep", str(PHYSICS_DT))
+    option.set("timestep", str(physics_dt))
+    if math.isclose(physics_dt, TRAINING_PHYSICS_DT):
+        option.set("integrator", "implicitfast")
+        option.set("solver", "Newton")
+        option.set("iterations", "100")
+        option.set("ls_iterations", "20")
+        option.set("noslip_iterations", "10")
 
     # The MuJoCo defaults (solref=0.02 1) are visibly too soft for these
     # high-resolution foot collision meshes. Keep the contact stable and firm
     # without making it perfectly rigid.
     collision_default = root.find("./default/default[@class='collision']/geom")
     if collision_default is not None:
+        collision_default.set("friction", MUJOCO_CONTACT_FRICTION)
         collision_default.set("solref", "0.005 1")
         collision_default.set("solimp", "0.95 0.99 0.001")
 
@@ -601,6 +654,17 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
             **contact_parameters,
         },
     )
+
+    if not add_door:
+        training_extras = {
+            "door_frame_left",
+            "door_frame_right",
+            "door_frame_header",
+            "sim2sim_door",
+        }
+        for element in list(worldbody):
+            if element.get("name") in training_extras:
+                worldbody.remove(element)
     ET.SubElement(
         door,
         "geom",
@@ -679,11 +743,11 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
         )
     worldbody.insert(2, target_frame)
 
-    # Render the measured eef_link pose with the same RGB coordinate frame as
-    # the command target. Sites are visual only and move with eef_link.
-    eef_frame = worldbody.find(".//body[@name='eef_link']")
+    # Render the measured gripper-base/camera-center pose with the same RGB
+    # coordinate frame as the command target.
+    eef_frame = worldbody.find(".//body[@name='das_base_link']")
     if eef_frame is None:
-        raise ValueError("eef_link body is missing from MJCF")
+        raise ValueError("DAS controller body das_base_link is missing from MJCF")
     ET.SubElement(
         eef_frame,
         "site",
@@ -727,7 +791,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
 
     # assembly.urdf models the UMI gripper as fixed geometry attached to
     # link6.  Do not inject the obsolete six-DoF DAS gripper at runtime: it
-    # would no longer match the trained robot or its eef_link frame.
+    # would no longer match the trained robot or its das_base_link frame.
 
     xml = ET.tostring(root, encoding="unicode")
     return mujoco.MjModel.from_xml_string(xml)
@@ -763,6 +827,46 @@ class ThreeOnnxPolicy:
             raise ValueError(f"Unexpected contactNet input: {contact_input.shape}")
         if gru_inputs[0].shape[-1] != 131 or gru_inputs[1].shape[-1] != 131:
             raise ValueError(f"Unexpected GRU inputs: {[item.shape for item in gru_inputs]}")
+
+        # The contactNet export advertises a dynamic sequence axis, but its
+        # attention reshape is trained/exported for exactly ten frames. Probe
+        # the complete three-model contract now so a mismatched export fails
+        # before the simulation starts.
+        contact_probe = np.zeros((1, HISTORY_LENGTH, CONTACT_OBS_DIM), dtype=np.float32)
+        contact_output = self.contact_net.run(
+            None,
+            {contact_input.name: contact_probe},
+        )[0]
+        if np.asarray(contact_output).shape != (1, 131):
+            raise ValueError(
+                "contactNet.onnx does not satisfy the required "
+                f"[1,{HISTORY_LENGTH},{CONTACT_OBS_DIM}] -> [1,131] contract: "
+                f"got {np.asarray(contact_output).shape}"
+            )
+        hidden_probe = np.zeros((1, 1, 131), dtype=np.float32)
+        gru_output, new_hidden = self.gru.run(
+            None,
+            {
+                gru_inputs[0].name: np.asarray(contact_output, dtype=np.float32),
+                gru_inputs[1].name: hidden_probe,
+            },
+        )
+        if np.asarray(gru_output).shape != (1, 131) or np.asarray(new_hidden).shape != (1, 1, 131):
+            raise ValueError(
+                "gru.onnx does not satisfy the required [1,131] + [1,1,131] contract"
+            )
+        actor_probe = self.actor.run(
+            None,
+            {
+                actor_inputs[0].name: np.zeros((1, OBS_DIM), dtype=np.float32),
+                actor_inputs[1].name: np.zeros((1, 67), dtype=np.float32),
+            },
+        )[0]
+        if np.asarray(actor_probe).shape != (1, ACTION_DIM):
+            raise ValueError(
+                f"actor.onnx does not satisfy the required [1,65]+[1,67]->[1,14] contract: "
+                f"got {np.asarray(actor_probe).shape}"
+            )
 
         self.hidden = np.zeros((1, 1, 131), dtype=np.float32)
 
@@ -807,7 +911,7 @@ class ThreeOnnxPolicy:
         action = np.asarray(action[0], dtype=np.float64)
         if action.shape != (ACTION_DIM,) or not np.isfinite(action).all():
             raise RuntimeError(f"Invalid actor output: shape={action.shape}, values={action}")
-        return np.clip(action, -100.0, 100.0)
+        return action
 
 
 class TerminalKeyboardController:
@@ -921,6 +1025,8 @@ class Sim2Sim:
         base_height: float,
         arm_max_step: float,
         max_leg_step: float,
+        policy_decimation: int,
+        se3_decrease_vel: float,
     ):
         self.model = model
         self.data = mujoco.MjData(model)
@@ -934,6 +1040,10 @@ class Sim2Sim:
             raise ValueError("--max-leg-step must be finite and non-negative")
         self.arm_max_step = float(arm_max_step)
         self.max_leg_step = float(max_leg_step)
+        self.policy_decimation = int(policy_decimation)
+        if not math.isfinite(se3_decrease_vel) or se3_decrease_vel < 0.0:
+            raise ValueError("--se3-decrease-vel must be finite and non-negative")
+        self.se3_decrease_vel = float(se3_decrease_vel)
 
         self.joint_qpos_adr = np.array([model.joint(name).qposadr[0] for name in JOINT_NAMES], dtype=int)
         self.joint_dof_adr = np.array([model.joint(name).dofadr[0] for name in JOINT_NAMES], dtype=int)
@@ -946,7 +1056,7 @@ class Sim2Sim:
         self.gripper_command = 0.0
 
         self.base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
-        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "eef_link")
+        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "das_base_link")
         self.target_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "command_target")
         target_frame_body_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_BODY, "command_target_frame"
@@ -1083,7 +1193,7 @@ class Sim2Sim:
         )
         if observation.shape != (OBS_DIM,):
             raise RuntimeError(f"Policy observation has shape {observation.shape}")
-        return np.clip(observation, -100.0, 100.0)
+        return observation
 
     def _initial_se3_distance(self) -> float:
         ee_position, ee_rotation = self.ee_pose_base()
@@ -1132,7 +1242,10 @@ class Sim2Sim:
         self.history.append(contact_obs)
         history = np.stack(self.history, axis=0)
         self.raw_action = self.policy(self.policy_observation(), history)
-        self.se3_distance_reference = max(0.0, self.se3_distance_reference - POLICY_DT)
+        self.se3_distance_reference = max(
+            0.0,
+            self.se3_distance_reference - self.se3_decrease_vel * POLICY_DT,
+        )
 
     def apply_pd(self, *, policy_updated: bool = False) -> None:
         position, velocity = self.joint_state()
@@ -1174,11 +1287,19 @@ class Sim2Sim:
         self.last_torque = torque
 
     def step(self, physics_step: int) -> None:
-        policy_updated = physics_step % POLICY_DECIMATION == 0
+        policy_updated = physics_step % self.policy_decimation == 0
         if policy_updated:
             self.infer()
         self.apply_pd(policy_updated=policy_updated)
         mujoco.mj_step(self.model, self.data)
+        # PhysX applies the ImplicitActuator velocity limits configured by the
+        # training asset. MuJoCo hinge joints have no equivalent max-velocity
+        # field, so enforce the same state constraint after integration.
+        self.data.qvel[self.joint_dof_adr] = np.clip(
+            self.data.qvel[self.joint_dof_adr],
+            -VELOCITY_LIMIT,
+            VELOCITY_LIMIT,
+        )
         self._update_target_marker()
         if not np.isfinite(self.data.qpos).all() or not np.isfinite(self.data.qvel).all():
             raise FloatingPointError("Simulation state became non-finite")
@@ -1209,6 +1330,15 @@ def configure_viewer(viewer_handle, base_body_id: int, track_robot: bool) -> Non
 
 
 def run(args: argparse.Namespace) -> None:
+    if not math.isfinite(args.physics_dt) or args.physics_dt <= 0.0:
+        raise ValueError("--physics-dt must be finite and positive")
+    decimation_float = POLICY_DT / args.physics_dt
+    policy_decimation = round(decimation_float)
+    if policy_decimation < 1 or not math.isclose(
+        decimation_float, policy_decimation, rel_tol=0.0, abs_tol=1.0e-9
+    ):
+        raise ValueError("--physics-dt must divide the 0.02 s policy period exactly")
+
     trajectory = None
     if args.trajectory is not None:
         trajectory = PickleTrajectory(
@@ -1244,6 +1374,32 @@ def run(args: argparse.Namespace) -> None:
         f"arm_max_step={args.arm_max_step:g} rad，"
         f"max_leg_step={args.max_leg_step:g} rad（0=关闭）"
     )
+    clock_status = (
+        "严格匹配训练"
+        if math.isclose(args.physics_dt, TRAINING_PHYSICS_DT)
+        else "MuJoCo稳定接触子步（策略周期仍匹配训练）"
+    )
+    print(
+        f"[sim2sim] 时钟：physics_dt={args.physics_dt:g}s × {policy_decimation} "
+        f"= policy_dt={POLICY_DT:g}s；{clock_status}"
+    )
+    if math.isclose(args.physics_dt, TRAINING_PHYSICS_DT):
+        print(
+            "[sim2sim] WARNING: 5 ms 与训练时钟相同，但当前 MuJoCo 足底 mesh "
+            "长时间接触可能不稳定；PhysX 与 MuJoCo 求解器仍不会逐值相同。"
+        )
+    print(f"[sim2sim] 场景：{'平地 + 门（部署测试）' if args.door else '平地（匹配训练）'}")
+    print(
+        f"[sim2sim] SE3参考衰减：{args.se3_decrease_vel:g} m/rad-equivalent per second"
+    )
+    print(
+        f"[sim2sim] latent：{'逐步采样（匹配训练）' if args.sample_latent else '使用均值（确定性诊断）'}"
+    )
+    if command_frame == "base":
+        print(
+            "[sim2sim] WARNING: --command-frame base 会让目标跟随移动基座；"
+            "训练契约是采样后固定在 world，严格对比请使用默认 world。"
+        )
     if trajectory is not None:
         print(
             f"[trajectory] file={trajectory.path}, episode={trajectory.episode_index}, "
@@ -1252,7 +1408,7 @@ def run(args: argparse.Namespace) -> None:
             f"duration={trajectory.duration:.3f}s, start_delay={trajectory.start_delay:g}s"
         )
 
-    model = load_sim_model(args.mjcf)
+    model = load_sim_model(args.mjcf, physics_dt=args.physics_dt, add_door=args.door)
     policy = ThreeOnnxPolicy(model_dir, args.sample_latent, rng)
     simulation = Sim2Sim(
         model,
@@ -1262,12 +1418,35 @@ def run(args: argparse.Namespace) -> None:
         args.base_height,
         args.arm_max_step,
         args.max_leg_step,
+        policy_decimation,
+        args.se3_decrease_vel,
     )
+    if args.eef_x_offset is not None:
+        if not math.isfinite(args.eef_x_offset):
+            raise ValueError("--eef-x-offset must be finite")
+        initial_eef_world = simulation.data.xpos[simulation.ee_body_id].copy()
+        initial_eef_rotation_world = simulation.data.xmat[simulation.ee_body_id].reshape(3, 3).copy()
+        target_eef_world = initial_eef_world + np.array(
+            [args.eef_x_offset, 0.0, 0.0], dtype=np.float64
+        )
+        simulation.command_frame = "world"
+        simulation.set_target(
+            target_eef_world,
+            initial_eef_rotation_world,
+            reset_reference=True,
+        )
+        actual_offset = simulation.target_position - initial_eef_world
+        print(
+            "[sim2sim] EEF相对目标确认："
+            f"initial_world={initial_eef_world.round(6).tolist()}, "
+            f"target_world={simulation.target_position.round(6).tolist()}, "
+            f"delta_world={actual_offset.round(6).tolist()} m"
+        )
     keyboard = TerminalKeyboardController(args.keyboard_step)
 
     if args.duration is None:
         if trajectory is None:
-            run_duration = 30.0
+            run_duration = 10.0
         elif trajectory.loop:
             run_duration = 0.0
         else:
@@ -1276,9 +1455,14 @@ def run(args: argparse.Namespace) -> None:
             run_duration = trajectory.start_delay + trajectory.duration + POLICY_DT
     else:
         run_duration = args.duration
-    max_steps = math.inf if run_duration <= 0 else math.ceil(run_duration / PHYSICS_DT)
-    log_steps = max(1, round(args.log_interval / PHYSICS_DT))
-    render_steps = max(1, round(1.0 / (max(args.render_fps, 1.0) * PHYSICS_DT)))
+    if run_duration > 10.0 and trajectory is None:
+        print(
+            "[sim2sim] WARNING: 运行时间超过训练 episode_length_s=10；"
+            "10 秒后的递归状态不再严格属于训练时序。"
+        )
+    max_steps = math.inf if run_duration <= 0 else math.ceil(run_duration / args.physics_dt)
+    log_steps = max(1, round(args.log_interval / args.physics_dt))
+    render_steps = max(1, round(1.0 / (max(args.render_fps, 1.0) * args.physics_dt)))
 
     def loop(viewer_handle=None) -> None:
         physics_step = 0
@@ -1315,7 +1499,7 @@ def run(args: argparse.Namespace) -> None:
                     f"[keyboard] target({command_frame})="
                     f"{simulation.target_position.round(4).tolist()}"
                 )
-            if trajectory is not None and physics_step % POLICY_DECIMATION == 0:
+            if trajectory is not None and physics_step % policy_decimation == 0:
                 trajectory.update(simulation)
             simulation.step(physics_step)
             physics_step += 1
