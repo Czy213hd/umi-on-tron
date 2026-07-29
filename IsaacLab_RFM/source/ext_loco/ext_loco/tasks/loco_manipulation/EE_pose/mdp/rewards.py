@@ -566,12 +566,13 @@ def base_pitch_exp(
 
     ``projected_gravity_b[:, 0]`` equals ``sin(pitch)`` for the base frame, so this
     isolates forward/backward tilt without also penalizing roll.  ``scale`` controls
-    how quickly the penalty grows; small angles remain non-zero but weak.
+    how quickly the penalty grows; small angles remain non-zero but weak.  The
+    penalty is bounded to ``[0, 1]`` (up to floating-point saturation).
     """
     asset: Articulation = env.scene[asset_cfg.name]
     pitch = torch.asin(asset.data.projected_gravity_b[:, 0].clamp(-1.0, 1.0))
     normalized_pitch_sq = torch.square(pitch / scale)
-    return torch.expm1(normalized_pitch_sq.clamp(max=20.0))
+    return -torch.expm1(-normalized_pitch_sq)
 
 
 def contact_ankle_deviation_l2(
