@@ -527,6 +527,53 @@ def body_ee_alignment(env: ManagerBasedRLEnv, joint_names: Sequence[str] = ("J1"
     return torch.sum(diff.abs(), dim=1)
 
 
+def base_target_heading_alignment(
+    env: ManagerBasedRLEnv,
+    command_name: str = "EE_pose",
+    min_target_distance: float = 0.1,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward base +X alignment with the base-to-target direction in the world XY plane.
+
+    The returned value is ``(cos(theta) + 1) / 2`` and therefore lies in ``[0, 1]``.
+    Once the target is closer than ``min_target_distance`` in XY, heading is considered
+    satisfied because the direction of a near-zero displacement is ill-defined.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    command_term = env.command_manager.get_term(command_name)
+
+    target_delta_xy = command_term.pose_command_w[:, :2] - asset.data.root_link_pos_w[:, :2]
+    target_distance_xy = torch.linalg.vector_norm(target_delta_xy, dim=1)
+    target_direction_xy = target_delta_xy / target_distance_xy.unsqueeze(1).clamp_min(1.0e-6)
+
+    base_x = torch.zeros_like(asset.data.root_link_pos_w)
+    base_x[:, 0] = 1.0
+    base_x_w = math_utils.quat_apply(asset.data.root_link_quat_w, base_x)
+    base_x_xy = base_x_w[:, :2]
+    base_x_xy = base_x_xy / torch.linalg.vector_norm(base_x_xy, dim=1, keepdim=True).clamp_min(1.0e-6)
+
+    cosine = torch.sum(base_x_xy * target_direction_xy, dim=1).clamp(-1.0, 1.0)
+    alignment = 0.5 * (cosine + 1.0)
+    return torch.where(target_distance_xy >= min_target_distance, alignment, torch.ones_like(alignment))
+
+
+def base_pitch_exp(
+    env: ManagerBasedRLEnv,
+    scale: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Exponentially penalize forward/backward base tilt without a dead-zone.
+
+    ``projected_gravity_b[:, 0]`` equals ``sin(pitch)`` for the base frame, so this
+    isolates forward/backward tilt without also penalizing roll.  ``scale`` controls
+    how quickly the penalty grows; small angles remain non-zero but weak.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    pitch = torch.asin(asset.data.projected_gravity_b[:, 0].clamp(-1.0, 1.0))
+    normalized_pitch_sq = torch.square(pitch / scale)
+    return torch.expm1(normalized_pitch_sq.clamp(max=20.0))
+
+
 def contact_ankle_deviation_l2(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,

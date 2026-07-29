@@ -124,8 +124,8 @@ def prepare_quantity_for_tron1_piper(
 
     arm_joint_idx, _ = asset.find_joints(r"J\d")
 
-    # DAS_Controller_V3_with_flange/base_link (uniquely named in the combined asset).
-    ee_link_idx, _ = asset.find_bodies("das_base_link")
+    # J6 is a joint; link6 is its child rigid body and is the configured EEF.
+    ee_link_idx, _ = asset.find_bodies("link6")
 
     base_idx, _ = asset.find_bodies("base_Link")
 
