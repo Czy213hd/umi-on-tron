@@ -407,6 +407,44 @@ def track_EE_orientation_exp(
     return (normal + micro_enhancement) * position_scale * (1 - env._loco_mani_scale) * env._mani_safety_scale
 
 
+def track_EE_orientation_coarse_exp(
+    env: ManagerBasedRLEnv,
+    std: float = 1.5,
+    command_name: str = "EE_pose",
+) -> torch.Tensor:
+    """Wide-kernel EE orientation reward that remains active throughout the command.
+
+    This term supplies a useful learning signal while the orientation error is still
+    large.  It is intentionally independent of the position and locomotion-to-
+    manipulation gates; the existing orientation reward keeps its original staged
+    behavior.
+    """
+
+    EE_orientation_error = env.command_manager.get_term(command_name).metrics["orientation_error"]
+    return torch.exp(-torch.square(EE_orientation_error / std))
+
+
+def track_EE_orientation_fine_exp(
+    env: ManagerBasedRLEnv,
+    std: float = 0.25,
+    command_name: str = "EE_pose",
+) -> torch.Tensor:
+    """Narrow-kernel EE orientation reward for near-target refinement.
+
+    Unlike the coarse term, this reward retains the position-priority and
+    manipulation-stage gates so that precision is emphasized after reaching the
+    target neighborhood.
+    """
+
+    command_term = env.command_manager.get_term(command_name)
+    EE_position_error = command_term.metrics["position_error"]
+    EE_orientation_error = command_term.metrics["orientation_error"]
+
+    fine = torch.exp(-torch.square(EE_orientation_error / std))
+    position_scale = torch.exp(-EE_position_error / 0.5)
+    return fine * position_scale * (1 - env._loco_mani_scale) * env._mani_safety_scale
+
+
 def reach_EE_position(
     env: ManagerBasedRLEnv, std: float, duration: float = 3, command_name: str = "EE_pose", init_value: float = 0.99
 ) -> torch.Tensor:

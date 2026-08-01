@@ -352,8 +352,8 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.6, 1),       # by CZY
-            "dynamic_friction_range": (0.4, 0.9),    # by CZY
+            "static_friction_range": (0.7, 1.3),       # by CZY
+            "dynamic_friction_range": (0.6, 1.2),    # by CZY
             "restitution_range": (0.0, 0.0),
             "num_buckets": 64,
         },
@@ -448,7 +448,17 @@ class RewardsCfg:
     # )
     # EE Tracking
     track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=6.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})            #2.0 by Edwin
-    track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=3.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})      #3.0 by Edwin
+    # track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=6.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})      #3.0 by Edwin
+    track_EE_orientation_coarse_exp = RewTerm(
+        func=mdp.track_EE_orientation_coarse_exp,
+        weight=6.0,
+        params={"command_name": "EE_pose", "std": 1.5},
+    )
+    track_EE_orientation_fine_exp = RewTerm(
+        func=mdp.track_EE_orientation_fine_exp,
+        weight=6.0,
+        params={"command_name": "EE_pose", "std": 0.25},
+    )
     track_EE_pb = RewTerm(func=mdp.track_EE_pb, weight=15.0)
     base_target_heading_alignment = RewTerm(
         func=mdp.base_target_heading_alignment,
@@ -478,9 +488,9 @@ class RewardsCfg:
                 "J1": 5.0,
                 "J2": 5.0,
                 "J3": 5.0,
-                "J4": 15.0,
-                "J5": 15.0,
-                "J6": 15.0,
+                "J4": 5.0,#15
+                "J5": 5.0,#15
+                "J6": 5.0,#15
             }
         },
     )

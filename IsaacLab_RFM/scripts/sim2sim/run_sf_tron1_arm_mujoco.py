@@ -46,8 +46,7 @@ DEPLOYED_MODEL_DIR = (
 )
 WBC_LOG_ROOT = Path(os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs"))
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
-# The trained task tracks DAS_Controller_V3_with_flange/base_link, uniquely
-# named das_base_link in the combined robot asset. No tip offset is applied.
+# The checkpoint tracks J6's child rigid body, link6. No tip offset is applied.
 TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
 TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
 
@@ -83,6 +82,12 @@ LEG_NAMES = (
 ARM_NAMES = ("J1", "J2", "J3", "J4", "J5", "J6")
 LEG_IDS = np.array([JOINT_NAMES.index(name) for name in LEG_NAMES], dtype=int)
 ARM_IDS = np.array([JOINT_NAMES.index(name) for name in ARM_NAMES], dtype=int)
+# JointPositionAction scales saved in this checkpoint's params/env.yaml:
+# legs/ankles=0.6, J1-J3=0.3, J4-J6=0.2.
+ACTION_SCALE = np.array(
+    [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.3, 0.6, 0.6, 0.3, 0.3, 0.2, 0.2, 0.2],
+    dtype=np.float64,
+)
 DEFAULT_JOINT_POS = np.array(
     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
@@ -239,6 +244,14 @@ def parse_args() -> argparse.Namespace:
         help="Target-position increment per key press in metres (default: 0.02).",
     )
     parser.add_argument(
+        "--keyboard-rotation-step",
+        "--keyboard-rpy-step",
+        dest="keyboard_rotation_step",
+        type=float,
+        default=math.radians(5.0),
+        help="Target roll/pitch/yaw increment per key press in radians (default: 5 degrees).",
+    )
+    parser.add_argument(
         "--trajectory",
         type=Path,
         help=f"Play a pushing.pkl trajectory (known file: {DEFAULT_TRAJECTORY}).",
@@ -340,6 +353,21 @@ def rotation_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def rpy_from_rotation(rotation: np.ndarray) -> np.ndarray:
+    """Return ZYX roll, pitch and yaw angles from a rotation matrix."""
+    rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    horizontal = math.hypot(float(rotation[0, 0]), float(rotation[1, 0]))
+    if horizontal > 1.0e-8:
+        roll = math.atan2(float(rotation[2, 1]), float(rotation[2, 2]))
+        pitch = math.atan2(-float(rotation[2, 0]), horizontal)
+        yaw = math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
+    else:
+        roll = math.atan2(-float(rotation[1, 2]), float(rotation[1, 1]))
+        pitch = math.atan2(-float(rotation[2, 0]), horizontal)
+        yaw = 0.0
+    return np.array([roll, pitch, yaw], dtype=np.float64)
 
 
 def rotation_angle(rotation: np.ndarray) -> float:
@@ -743,11 +771,11 @@ def load_sim_model(
         )
     worldbody.insert(2, target_frame)
 
-    # Render the measured gripper-base/camera-center pose with the same RGB
-    # coordinate frame as the command target.
-    eef_frame = worldbody.find(".//body[@name='das_base_link']")
+    # Render the measured link6 pose with the same RGB coordinate frame as the
+    # command target.
+    eef_frame = worldbody.find(".//body[@name='link6']")
     if eef_frame is None:
-        raise ValueError("DAS controller body das_base_link is missing from MJCF")
+        raise ValueError("J6 child body link6 is missing from MJCF")
     ET.SubElement(
         eef_frame,
         "site",
@@ -790,8 +818,7 @@ def load_sim_model(
         )
 
     # assembly.urdf models the UMI gripper as fixed geometry attached to
-    # link6.  Do not inject the obsolete six-DoF DAS gripper at runtime: it
-    # would no longer match the trained robot or its das_base_link frame.
+    # link6. Do not inject the obsolete six-DoF DAS gripper at runtime.
 
     xml = ET.tostring(root, encoding="unicode")
     return mujoco.MjModel.from_xml_string(xml)
@@ -917,7 +944,7 @@ class ThreeOnnxPolicy:
 class TerminalKeyboardController:
     """Read target commands directly from the launching terminal."""
 
-    KEY_DELTAS = {
+    POSITION_KEY_DELTAS = {
         "W": np.array([1.0, 0.0, 0.0]),
         "S": np.array([-1.0, 0.0, 0.0]),
         "A": np.array([0.0, 1.0, 0.0]),
@@ -925,12 +952,24 @@ class TerminalKeyboardController:
         "R": np.array([0.0, 0.0, 1.0]),
         "F": np.array([0.0, 0.0, -1.0]),
     }
+    RPY_KEY_DELTAS = {
+        "T": np.array([1.0, 0.0, 0.0]),
+        "G": np.array([-1.0, 0.0, 0.0]),
+        "Y": np.array([0.0, 1.0, 0.0]),
+        "H": np.array([0.0, -1.0, 0.0]),
+        "U": np.array([0.0, 0.0, 1.0]),
+        "J": np.array([0.0, 0.0, -1.0]),
+    }
 
-    def __init__(self, step: float):
-        if step <= 0:
+    def __init__(self, position_step: float, rotation_step: float):
+        if not math.isfinite(position_step) or position_step <= 0:
             raise ValueError("--keyboard-step must be greater than zero")
-        self.step = float(step)
-        self._pending_delta = np.zeros(3, dtype=np.float64)
+        if not math.isfinite(rotation_step) or rotation_step <= 0:
+            raise ValueError("--keyboard-rotation-step must be greater than zero")
+        self.position_step = float(position_step)
+        self.rotation_step = float(rotation_step)
+        self._pending_position_delta = np.zeros(3, dtype=np.float64)
+        self._pending_rpy_delta = np.zeros(3, dtype=np.float64)
         self._print_requested = False
         self._gripper_command: float | None = None
         self._quit_requested = False
@@ -974,9 +1013,12 @@ class TerminalKeyboardController:
         """Queue one target-control key from either terminal or viewer."""
         key = key.upper()
         with self._lock:
-            direction = self.KEY_DELTAS.get(key)
-            if direction is not None:
-                self._pending_delta += direction * self.step
+            position_direction = self.POSITION_KEY_DELTAS.get(key)
+            rotation_direction = self.RPY_KEY_DELTAS.get(key)
+            if position_direction is not None:
+                self._pending_position_delta += position_direction * self.position_step
+            elif rotation_direction is not None:
+                self._pending_rpy_delta += rotation_direction * self.rotation_step
             elif key == "P":
                 self._print_requested = True
             elif key == "O":
@@ -991,16 +1033,18 @@ class TerminalKeyboardController:
         if 0 <= keycode <= 0x10FFFF:
             self._queue_key(chr(keycode))
 
-    def consume(self) -> tuple[np.ndarray, bool, float | None, bool]:
+    def consume(self) -> tuple[np.ndarray, np.ndarray, bool, float | None, bool]:
         with self._lock:
-            delta = self._pending_delta.copy()
+            position_delta = self._pending_position_delta.copy()
+            rpy_delta = self._pending_rpy_delta.copy()
             print_requested = self._print_requested
             gripper_command = self._gripper_command
             quit_requested = self._quit_requested
-            self._pending_delta.fill(0.0)
+            self._pending_position_delta.fill(0.0)
+            self._pending_rpy_delta.fill(0.0)
             self._print_requested = False
             self._gripper_command = None
-        return delta, print_requested, gripper_command, quit_requested
+        return position_delta, rpy_delta, print_requested, gripper_command, quit_requested
 
     def close(self) -> None:
         self._stop.set()
@@ -1056,7 +1100,7 @@ class Sim2Sim:
         self.gripper_command = 0.0
 
         self.base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
-        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "das_base_link")
+        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "link6")
         self.target_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "command_target")
         target_frame_body_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_BODY, "command_target_frame"
@@ -1216,6 +1260,15 @@ class Sim2Sim:
         self.se3_distance_reference = self._initial_se3_distance()
         self._update_target_marker()
 
+    def rotate_target(self, delta_rpy: np.ndarray) -> None:
+        """Rotate the target incrementally about its local roll/pitch/yaw axes."""
+        delta_rpy = np.asarray(delta_rpy, dtype=np.float64)
+        if delta_rpy.shape != (3,) or not np.isfinite(delta_rpy).all():
+            raise ValueError("Target RPY delta must contain three finite values")
+        self.target_rotation = self.target_rotation @ rotation_from_rpy(*delta_rpy)
+        self.se3_distance_reference = self._initial_se3_distance()
+        self._update_target_marker()
+
     def set_target(
         self,
         position: np.ndarray,
@@ -1255,7 +1308,8 @@ class Sim2Sim:
             # saturate only the resulting PD torque below.  Pre-clipping the
             # position target changes both the closed-loop dynamics and the
             # last_action observation seen by the policy.
-            self.raw_desired_position = DEFAULT_JOINT_POS + self.raw_action
+            scaled_action = self.raw_action * ACTION_SCALE
+            self.raw_desired_position = DEFAULT_JOINT_POS + scaled_action
             self.policy_desired_position = self.raw_desired_position.copy()
 
             command = self.policy_desired_position.copy()
@@ -1365,6 +1419,10 @@ def run(args: argparse.Namespace) -> None:
     print(f"[sim2sim] MJCF: {args.mjcf.expanduser().resolve()}")
     print(f"[sim2sim] ONNX: {model_dir.expanduser().resolve()}")
     print(
+        "[sim2sim] 训练契约：EE frame=link6；"
+        "action scale=legs/ankles 0.6, J1-J3 0.3, J4-J6 0.2"
+    )
+    print(
         "[sim2sim] 最终点 "
         f"({command_frame}): xyz={command[:3].tolist()}, "
         f"rpy={command[3:].tolist()} rad"
@@ -1442,7 +1500,7 @@ def run(args: argparse.Namespace) -> None:
             f"target_world={simulation.target_position.round(6).tolist()}, "
             f"delta_world={actual_offset.round(6).tolist()} m"
         )
-    keyboard = TerminalKeyboardController(args.keyboard_step)
+    keyboard = TerminalKeyboardController(args.keyboard_step, args.keyboard_rotation_step)
 
     if args.duration is None:
         if trajectory is None:
@@ -1464,6 +1522,14 @@ def run(args: argparse.Namespace) -> None:
     log_steps = max(1, round(args.log_interval / args.physics_dt))
     render_steps = max(1, round(1.0 / (max(args.render_fps, 1.0) * args.physics_dt)))
 
+    def print_keyboard_target() -> None:
+        target_rpy = rpy_from_rotation(simulation.target_rotation)
+        print(
+            f"[keyboard] target({simulation.command_frame}) "
+            f"xyz={simulation.target_position.round(4).tolist()}, "
+            f"rpy={target_rpy.round(4).tolist()} rad"
+        )
+
     def loop(viewer_handle=None) -> None:
         physics_step = 0
         # Establish the wall-clock epoch only after the viewer has finished
@@ -1474,13 +1540,20 @@ def run(args: argparse.Namespace) -> None:
         last_log_sim = simulation.data.time
         viewer_sync_count = 0
         while physics_step < max_steps and (viewer_handle is None or viewer_handle.is_running()):
-            target_delta, print_target, gripper_command, quit_requested = keyboard.consume()
+            (
+                target_delta,
+                target_rpy_delta,
+                print_target,
+                gripper_command,
+                quit_requested,
+            ) = keyboard.consume()
             if quit_requested:
                 print("\n[keyboard] 终端请求退出。")
                 break
             if gripper_command is not None:
                 simulation.set_gripper_command(gripper_command)
                 print("[keyboard] 当前 URDF 将夹爪建模为固定几何，O/C 不改变模型。")
+            target_changed = False
             if np.any(target_delta):
                 if trajectory is not None:
                     trajectory.translate_offset(target_delta)
@@ -1490,15 +1563,15 @@ def run(args: argparse.Namespace) -> None:
                     )
                 else:
                     simulation.translate_target(target_delta)
-                    print(
-                        f"[keyboard] target({command_frame})="
-                        f"{simulation.target_position.round(4).tolist()}"
-                    )
-            elif print_target:
-                print(
-                    f"[keyboard] target({command_frame})="
-                    f"{simulation.target_position.round(4).tolist()}"
-                )
+                    target_changed = True
+            if np.any(target_rpy_delta):
+                if trajectory is not None:
+                    print("[keyboard] 轨迹模式暂不支持姿态偏移；RPY 按键已忽略。")
+                else:
+                    simulation.rotate_target(target_rpy_delta)
+                    target_changed = True
+            if target_changed or print_target:
+                print_keyboard_target()
             if trajectory is not None and physics_step % policy_decimation == 0:
                 trajectory.update(simulation)
             simulation.step(physics_step)
@@ -1557,9 +1630,13 @@ def run(args: argparse.Namespace) -> None:
                 viewer_sync_count = 0
 
     print(
-        "[keyboard] MuJoCo 窗口或终端均可控制：W/S = ±X，A/D = ±Y，R/F = ±Z，"
-        f"P = 显示坐标，Q = 退出；"
-        f"步长 {args.keyboard_step:g} m"
+        "[keyboard] MuJoCo 窗口或终端均可控制："
+        "W/S = ±X，A/D = ±Y，R/F = ±Z；"
+        "T/G = ±Roll，Y/H = ±Pitch，U/J = ±Yaw；"
+        "P = 显示目标，Q = 退出；"
+        f"位置步长 {args.keyboard_step:g} m，"
+        f"旋转步长 {args.keyboard_rotation_step:g} rad "
+        f"({math.degrees(args.keyboard_rotation_step):g} deg)"
     )
     keyboard.start()
     try:
