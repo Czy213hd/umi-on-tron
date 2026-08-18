@@ -3,8 +3,8 @@
 
 The inference chain matches the IsaacLab/RSL-RL export:
 
-    10 x 55 contact observations -> contactNet -> GRU -> 67-D latent
-    65-D policy observation + 67-D latent -> actor -> 14 joint targets
+    10 x 57 contact observations -> contactNet -> GRU -> 67-D latent
+    67-D policy observation + 67-D latent -> actor -> 14 joint targets
 
 If ``--command`` is omitted, the program asks for a final end-effector pose
 as ``x y z roll pitch yaw`` before opening the viewer.
@@ -43,8 +43,7 @@ DEPLOYED_MODEL_DIR = (
 )
 WBC_LOG_ROOT = Path(os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs"))
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
-# Training tracks the URDF's eef_link directly, so no legacy link6 -> tip
-# transform is applied during trajectory playback.
+# Training tracks the URDF's J6 child body link6 directly.
 TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
 TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
 
@@ -78,10 +77,16 @@ LEG_NAMES = (
 ARM_NAMES = ("J1", "J2", "J3", "J4", "J5", "J6")
 LEG_IDS = np.array([JOINT_NAMES.index(name) for name in LEG_NAMES], dtype=int)
 ARM_IDS = np.array([JOINT_NAMES.index(name) for name in ARM_NAMES], dtype=int)
+ACTION_SCALE = np.array(
+    [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.3, 0.6, 0.6, 0.3, 0.3, 0.2, 0.2, 0.2],
+    dtype=np.float64,
+)
 DEFAULT_JOINT_POS = np.array(
     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
 )
+ISAAC_RESET_JOINT_POS = DEFAULT_JOINT_POS.copy()
+ISAAC_RESET_JOINT_POS[JOINT_NAMES.index("J3")] = 0.065
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
@@ -104,13 +109,13 @@ PHYSICS_DT = 0.001
 POLICY_DECIMATION = 20
 POLICY_DT = PHYSICS_DT * POLICY_DECIMATION
 HISTORY_LENGTH = 10
-OBS_DIM = 65
-CONTACT_OBS_DIM = 55
+OBS_DIM = 67
+CONTACT_OBS_DIM = 57
 ACTION_DIM = 14
 # MuJoCo friction is (sliding, torsional, rolling), not static/dynamic/rolling.
-# Keep deterministic sim2sim at the IsaacLab terrain's nominal coefficient;
-# IsaacLab's training-side material randomization remains untouched.
-MUJOCO_CONTACT_FRICTION = "1.0 0.005 0.0001"
+# Training randomizes static friction in [0.7, 1.3] and dynamic friction in
+# [0.6, 1.2]. Their shared midpoint, 0.9, is the deterministic parity value.
+MUJOCO_CONTACT_FRICTION = "0.9 0.005 0.0001"
 
 
 def format_named(names: tuple[str, ...], values: np.ndarray) -> str:
@@ -152,12 +157,21 @@ def parse_args() -> argparse.Namespace:
         help="Simulation duration in seconds; 0 runs until the viewer closes. "
         "Default: 30 s manually, or one complete trajectory.",
     )
-    parser.add_argument("--base-height", type=float, default=0.84)
-    parser.add_argument(
+    parser.add_argument("--base-height", type=float, default=0.8)
+    latent_group = parser.add_mutually_exclusive_group()
+    latent_group.add_argument(
         "--sample-latent",
+        dest="sample_latent",
         action="store_true",
-        help="Sample the predicted latent distribution instead of using its mean.",
+        help="Sample the predicted latent distribution (default; matches training).",
     )
+    latent_group.add_argument(
+        "--mean-latent",
+        dest="sample_latent",
+        action="store_false",
+        help="Use the latent mean for deterministic diagnostics.",
+    )
+    parser.set_defaults(sample_latent=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-realtime", action="store_true")
@@ -524,11 +538,11 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
         )
     worldbody.insert(2, target_frame)
 
-    # Render the measured eef_link pose with the same RGB coordinate frame as
-    # the command target. Sites are visual only and move with eef_link.
-    eef_frame = worldbody.find(".//body[@name='eef_link']")
+    # Render the measured link6 pose with the same RGB coordinate frame as
+    # the command target. Sites are visual only and move with link6.
+    eef_frame = worldbody.find(".//body[@name='link6']")
     if eef_frame is None:
-        raise ValueError("eef_link body is missing from MJCF")
+        raise ValueError("link6 body is missing from MJCF")
     ET.SubElement(
         eef_frame,
         "site",
@@ -722,7 +736,7 @@ class Sim2Sim:
             raise ValueError("One or more joint motors are missing from the MJCF")
 
         self.base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
-        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "eef_link")
+        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "link6")
         self.target_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "command_target")
         target_frame_body_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_BODY, "command_target_frame"
@@ -743,7 +757,7 @@ class Sim2Sim:
         mujoco.mj_resetData(model, self.data)
         root_adr = model.joint("root").qposadr[0]
         self.data.qpos[root_adr : root_adr + 7] = [0.0, 0.0, base_height, 1.0, 0.0, 0.0, 0.0]
-        self.data.qpos[self.joint_qpos_adr] = DEFAULT_JOINT_POS
+        self.data.qpos[self.joint_qpos_adr] = ISAAC_RESET_JOINT_POS
         self.data.qvel[:] = 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(model, self.data)
@@ -751,7 +765,11 @@ class Sim2Sim:
         self.raw_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.effective_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.last_action = np.zeros(ACTION_DIM, dtype=np.float64)
-        self.last_torque = np.zeros(ACTION_DIM, dtype=np.float64)
+        self.last_torque = np.clip(
+            -KP * ISAAC_RESET_JOINT_POS,
+            -TORQUE_LIMIT,
+            TORQUE_LIMIT,
+        )
         self.raw_desired_position = DEFAULT_JOINT_POS.copy()
         self.policy_desired_position = DEFAULT_JOINT_POS.copy()
         self.desired_position = DEFAULT_JOINT_POS.copy()
@@ -817,12 +835,11 @@ class Sim2Sim:
     def contact_observation(self) -> np.ndarray:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_torque,
                 self.pose_6d(ee_position, ee_rotation),
@@ -836,13 +853,12 @@ class Sim2Sim:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
         target_position, target_rotation = self.target_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
                 self.pose_6d(target_position, target_rotation),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_action,
                 self.pose_6d(ee_position, ee_rotation),
@@ -851,7 +867,7 @@ class Sim2Sim:
         )
         if observation.shape != (OBS_DIM,):
             raise RuntimeError(f"Policy observation has shape {observation.shape}")
-        return np.clip(observation, -100.0, 100.0)
+        return observation
 
     def _initial_se3_distance(self) -> float:
         ee_position, ee_rotation = self.ee_pose_base()
@@ -897,12 +913,9 @@ class Sim2Sim:
     def apply_pd(self, *, policy_updated: bool = False) -> None:
         position, velocity = self.joint_state()
         if policy_updated:
-            # Same torque-aware action clamp used by SolefootController.cpp.
-            action_min = position - DEFAULT_JOINT_POS + (KD * velocity - TORQUE_LIMIT) / KP
-            action_max = position - DEFAULT_JOINT_POS + (KD * velocity + TORQUE_LIMIT) / KP
-            self.effective_action = np.clip(self.raw_action, action_min, action_max)
-            self.raw_desired_position = DEFAULT_JOINT_POS + self.raw_action
-            self.policy_desired_position = DEFAULT_JOINT_POS + self.effective_action
+            scaled_action = self.raw_action * ACTION_SCALE
+            self.raw_desired_position = DEFAULT_JOINT_POS + scaled_action
+            self.policy_desired_position = self.raw_desired_position.copy()
 
             command = self.policy_desired_position.copy()
             if self.arm_max_step > 0.0:
@@ -918,11 +931,11 @@ class Sim2Sim:
                     self._previous_policy_command[LEG_IDS] + self.max_leg_step,
                 )
             self.desired_position = command
+            self.effective_action = command - DEFAULT_JOINT_POS
             self.policy_command_step = command - self._previous_policy_command
             self._previous_policy_command = command.copy()
-            # The policy observes the command that was actually applied, just
-            # like record_applied_targets() in the real deployment script.
-            self.last_action = command - DEFAULT_JOINT_POS
+            # mdp.last_action exposes the raw action-manager input in training.
+            self.last_action = self.raw_action.copy()
 
         torque = KP * (self.desired_position - position) - KD * velocity
         torque = np.clip(torque, -TORQUE_LIMIT, TORQUE_LIMIT)

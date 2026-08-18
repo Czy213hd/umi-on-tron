@@ -514,12 +514,17 @@ def reach_EE_orient(
     return (normal + micro_enhancement) * env._mani_safety_scale * (1 - env._loco_mani_scale)
 
 
-def track_EE_pb(env: ManagerBasedRLEnv, command_name: str = "EE_pose") -> torch.Tensor:
+def track_EE_pb(
+    env: ManagerBasedRLEnv,
+    command_name: str = "EE_pose",
+    orientation_weight: float = 1.0,
+) -> torch.Tensor:
     """基于优化进展（progress-based）的 EE 跟踪奖励。
 
     参数:
         env: 环境对象。
         command_name: 命令项名称。
+        orientation_weight: 姿态进展权重；位置专用任务设为 0。
 
     返回:
         shape=(num_envs,) 的进展奖励。
@@ -540,7 +545,7 @@ def track_EE_pb(env: ManagerBasedRLEnv, command_name: str = "EE_pose") -> torch.
         env, command_name=command_name
     )
     return (
-        (2 * pos_improve * position_scale + orient_improve * orient_scale)
+        (2 * pos_improve * position_scale + orientation_weight * orient_improve * orient_scale)
         * env._loco_safety_scale
         * near_target_progress_scale
     )
