@@ -124,7 +124,8 @@ def prepare_quantity_for_tron1_piper(
 
     arm_joint_idx, _ = asset.find_joints(r"J\d")
 
-    ee_link_idx, _ = asset.find_bodies("eef_link")
+    # J6 is a joint; link6 is its child rigid body and is the configured EEF.
+    ee_link_idx, _ = asset.find_bodies("link6")
 
     base_idx, _ = asset.find_bodies("base_Link")
 

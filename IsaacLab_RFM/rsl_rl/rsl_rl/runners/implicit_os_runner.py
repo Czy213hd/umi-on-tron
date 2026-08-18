@@ -220,15 +220,18 @@ class ImplicitOneStageRunner:
                     self.ppo_alg.process_env_step(rewards, dones, infos, next_obs)
                     if self.log_dir is not None:
                         # Book keeping
+                        new_ids = (dones > 0).nonzero(as_tuple=False)
                         # note: we changed logging to use "log" instead of "episode" to avoid confusion with
                         # different types of logging data (rewards, curriculum, etc.)
-                        if "episode" in infos:
-                            ep_infos.append(infos["episode"])
-                        elif "log" in infos:
-                            ep_infos.append(infos["log"])
+                        # The environment retains its last log dictionary on non-reset steps.  Only consume it
+                        # when at least one episode actually ended, otherwise stale values are counted repeatedly.
+                        if new_ids.numel() > 0:
+                            if "episode" in infos:
+                                ep_infos.append(infos["episode"])
+                            elif "log" in infos:
+                                ep_infos.append(infos["log"])
                         cur_reward_sum += rewards
                         cur_episode_length += 1
-                        new_ids = (dones > 0).nonzero(as_tuple=False)
                         rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
@@ -290,25 +293,61 @@ class ImplicitOneStageRunner:
 
         ep_string = ""
         if locs["ep_infos"]:
-            for key in locs["ep_infos"][0]:
-                infotensor = torch.tensor([], device=self.device)
+            weighted_sum_suffix = ".__weighted_sum"
+            weighted_count_suffix = ".__weighted_count"
+
+            # Preserve first-seen order while allowing metrics that were absent from the first reset event.
+            info_keys = list(dict.fromkeys(key for ep_info in locs["ep_infos"] for key in ep_info))
+            info_key_set = set(info_keys)
+            weighted_metric_names = []
+            private_weighted_keys = set()
+            for key in info_keys:
+                if not key.endswith(weighted_sum_suffix):
+                    continue
+                metric_name = key[: -len(weighted_sum_suffix)]
+                count_key = metric_name + weighted_count_suffix
+                if count_key in info_key_set:
+                    weighted_metric_names.append(metric_name)
+                    private_weighted_keys.update((key, count_key))
+
+            def collect_info_values(key):
+                values = []
                 for ep_info in locs["ep_infos"]:
-                    # handle scalar and zero dimensional tensor infos
                     if key not in ep_info:
                         continue
-                    if not isinstance(ep_info[key], torch.Tensor):
-                        ep_info[key] = torch.Tensor([ep_info[key]])
-                    if len(ep_info[key].shape) == 0:
-                        ep_info[key] = ep_info[key].unsqueeze(0)
-                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-                value = torch.mean(infotensor)
-                # log to logger and terminal
+                    value = torch.as_tensor(ep_info[key], device=self.device, dtype=torch.float32).reshape(-1)
+                    values.append(value)
+                if not values:
+                    return torch.empty(0, device=self.device)
+                return torch.cat(values)
+
+            def log_episode_value(key, value):
+                nonlocal ep_string
                 if "/" in key:
                     self.writer.add_scalar(key, value, locs["it"])
                     ep_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
                 else:
                     self.writer.add_scalar("Episode/" + key, value, locs["it"])
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+
+            for key in info_keys:
+                if key in private_weighted_keys:
+                    continue
+                infotensor = collect_info_values(key)
+                if infotensor.numel() > 0:
+                    log_episode_value(key, torch.mean(infotensor))
+
+            # Weighted precision metrics retain their sample/command counts across asynchronous reset batches.
+            for metric_name in weighted_metric_names:
+                numerator = collect_info_values(metric_name + weighted_sum_suffix).sum()
+                denominator = collect_info_values(metric_name + weighted_count_suffix).sum()
+                if (
+                    denominator.item() <= 0
+                    or not torch.isfinite(numerator).item()
+                    or not torch.isfinite(denominator).item()
+                ):
+                    continue
+                log_episode_value(metric_name, numerator / denominator)
         mean_std = self.actor_critic.std.mean()
 
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs["collection_time"] + locs["learn_time"]))

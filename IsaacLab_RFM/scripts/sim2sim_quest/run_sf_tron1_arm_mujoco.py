@@ -3,8 +3,8 @@
 
 The inference chain matches the IsaacLab/RSL-RL export:
 
-    10 x 55 contact observations -> contactNet -> GRU -> 67-D latent
-    65-D policy observation + 67-D latent -> actor -> 14 joint targets
+    10 x 57 contact observations -> contactNet -> GRU -> 67-D latent
+    67-D policy observation + 67-D latent -> actor -> 14 joint targets
 
 If ``--command`` is omitted, the program asks for a final end-effector pose
 as ``x y z roll pitch yaw`` before opening the viewer.
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import pickle
 import sys
 import threading
@@ -28,11 +29,7 @@ import onnxruntime as ort
 
 
 SCRIPT_PATH = Path(__file__).resolve()
-PROJECT_ROOT = SCRIPT_PATH.parent
-if (PROJECT_ROOT / "IsaacLab_RFM").is_dir():
-    ISAACLAB_ROOT = PROJECT_ROOT / "IsaacLab_RFM"
-else:
-    ISAACLAB_ROOT = SCRIPT_PATH.parents[2]
+ISAACLAB_ROOT = SCRIPT_PATH.parents[2]
 REPO_ROOT = ISAACLAB_ROOT.parent
 
 DEFAULT_MJCF = (
@@ -44,32 +41,28 @@ DEPLOYED_MODEL_DIR = (
     / "tron1_ws/src/tron1-rl-deploy-arm/src/robot_controllers/config/"
     "pointfoot/SF_TRON1A_ARX5ARM/policy"
 )
+WBC_LOG_ROOT = Path(os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs"))
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
-# Training now tracks the fixed UMI gripper-base frame eef_link directly.
-# Do not apply the old link6->tip transform during sim2sim playback.
+# Training tracks the URDF's J6 child body link6 directly.
 TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
 TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
-EEF_SITE_NAME = "eef_link"
-EEF_SITE_POS = "0.15 0 0"
-EEF_SITE_QUAT = "0.99144482142 0 0.130526495702 0"
 
-# This order must match PointfootCfg.init_state.joint_names and the training
-# articulation order. It is intentionally not MuJoCo's internal joint order.
+# Isaac Lab articulation/action order measured from the training environment.
 JOINT_NAMES = (
+    "abad_L_Joint",
+    "abad_R_Joint",
+    "hip_L_Joint",
+    "hip_R_Joint",
+    "knee_L_Joint",
+    "knee_R_Joint",
     "J1",
+    "ankle_L_Joint",
+    "ankle_R_Joint",
     "J2",
     "J3",
     "J4",
     "J5",
     "J6",
-    "abad_L_Joint",
-    "hip_L_Joint",
-    "knee_L_Joint",
-    "ankle_L_Joint",
-    "abad_R_Joint",
-    "hip_R_Joint",
-    "knee_R_Joint",
-    "ankle_R_Joint",
 )
 LEG_NAMES = (
     "abad_L_Joint",
@@ -84,22 +77,28 @@ LEG_NAMES = (
 ARM_NAMES = ("J1", "J2", "J3", "J4", "J5", "J6")
 LEG_IDS = np.array([JOINT_NAMES.index(name) for name in LEG_NAMES], dtype=int)
 ARM_IDS = np.array([JOINT_NAMES.index(name) for name in ARM_NAMES], dtype=int)
-DEFAULT_JOINT_POS = np.array(
-    [0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+ACTION_SCALE = np.array(
+    [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.3, 0.6, 0.6, 0.3, 0.3, 0.2, 0.2, 0.2],
     dtype=np.float64,
 )
+DEFAULT_JOINT_POS = np.array(
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
+    dtype=np.float64,
+)
+ISAAC_RESET_JOINT_POS = DEFAULT_JOINT_POS.copy()
+ISAAC_RESET_JOINT_POS[JOINT_NAMES.index("J3")] = 0.065
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
-    [18.0, 18.0, 18.0, 4.0, 4.0, 4.0, 40.0, 40.0, 40.0, 45.0, 40.0, 40.0, 40.0, 45.0],
+    [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 18.0, 45.0, 45.0, 18.0, 18.0, 4.0, 4.0, 4.0],
     dtype=np.float64,
 )
 KD = np.array(
-    [1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 1.8, 1.8, 1.8, 0.8, 1.8, 1.8, 1.8, 0.8],
+    [1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.0, 0.8, 0.8, 1.0, 1.0, 0.5, 0.5, 0.5],
     dtype=np.float64,
 )
 TORQUE_LIMIT = np.array(
-    [18.0, 18.0, 18.0, 3.0, 3.0, 3.0, 80.0, 80.0, 80.0, 40.0, 80.0, 80.0, 80.0, 40.0],
+    [80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 18.0, 40.0, 40.0, 18.0, 18.0, 3.0, 3.0, 3.0],
     dtype=np.float64,
 )
 
@@ -110,9 +109,13 @@ PHYSICS_DT = 0.001
 POLICY_DECIMATION = 20
 POLICY_DT = PHYSICS_DT * POLICY_DECIMATION
 HISTORY_LENGTH = 10
-OBS_DIM = 65
-CONTACT_OBS_DIM = 55
+OBS_DIM = 67
+CONTACT_OBS_DIM = 57
 ACTION_DIM = 14
+# MuJoCo friction is (sliding, torsional, rolling), not static/dynamic/rolling.
+# Training randomizes static friction in [0.7, 1.3] and dynamic friction in
+# [0.6, 1.2]. Their shared midpoint, 0.9, is the deterministic parity value.
+MUJOCO_CONTACT_FRICTION = "0.9 0.005 0.0001"
 
 
 def format_named(names: tuple[str, ...], values: np.ndarray) -> str:
@@ -145,7 +148,7 @@ def parse_args() -> argparse.Namespace:
         "--model-dir",
         type=Path,
         help="Directory containing actor.onnx, contactNet.onnx and gru.onnx. "
-        "Default: newest exported training run.",
+        "Default: newest exported run under WBC_LOG_ROOT, then the legacy local log.",
     )
     parser.add_argument(
         "--duration",
@@ -154,12 +157,21 @@ def parse_args() -> argparse.Namespace:
         help="Simulation duration in seconds; 0 runs until the viewer closes. "
         "Default: 30 s manually, or one complete trajectory.",
     )
-    parser.add_argument("--base-height", type=float, default=0.84)
-    parser.add_argument(
+    parser.add_argument("--base-height", type=float, default=0.8)
+    latent_group = parser.add_mutually_exclusive_group()
+    latent_group.add_argument(
         "--sample-latent",
+        dest="sample_latent",
         action="store_true",
-        help="Sample the predicted latent distribution instead of using its mean.",
+        help="Sample the predicted latent distribution (default; matches training).",
     )
+    latent_group.add_argument(
+        "--mean-latent",
+        dest="sample_latent",
+        action="store_false",
+        help="Use the latent mean for deterministic diagnostics.",
+    )
+    parser.set_defaults(sample_latent=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-realtime", action="store_true")
@@ -235,14 +247,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def newest_exported_model_dir() -> Path:
-    log_root = ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm"
+    log_roots = (
+        WBC_LOG_ROOT,
+        ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm",
+    )
     candidates = [
         path
+        for log_root in log_roots
         for path in log_root.glob("*/exported")
         if all((path / name).is_file() for name in ("actor.onnx", "contactNet.onnx", "gru.onnx"))
     ]
     if candidates:
-        return max(candidates, key=lambda path: path.parent.name)
+        return max(candidates, key=lambda path: (path.parent.stat().st_mtime_ns, path.parent.name))
     return DEPLOYED_MODEL_DIR
 
 
@@ -382,7 +398,7 @@ class PickleTrajectory:
 
         new_cycle = self.command_origin is None or cycle != self.current_cycle
         if new_cycle:
-            self.command_origin = simulation.data.site_xpos[simulation.ee_site_id].copy()
+            self.command_origin = simulation.data.xpos[simulation.ee_body_id].copy()
             self.current_cycle = cycle
             self.finished_message_printed = False
             print(
@@ -447,22 +463,6 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
     worldbody = root.find("worldbody")
     if worldbody is None:
         raise ValueError("MJCF has no worldbody")
-    link6_body = worldbody.find(".//body[@name='link6']")
-    if link6_body is None:
-        raise ValueError("MJCF has no link6 body for eef_link site attachment")
-    if link6_body.find(f"./site[@name='{EEF_SITE_NAME}']") is None:
-        ET.SubElement(
-            link6_body,
-            "site",
-            {
-                "name": EEF_SITE_NAME,
-                "pos": EEF_SITE_POS,
-                "quat": EEF_SITE_QUAT,
-                "size": "0.012",
-                "rgba": "1 0.8 0.05 0.9",
-                "group": "0",
-            },
-        )
     worldbody.insert(
         0,
         ET.Element(
@@ -472,7 +472,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
                 "type": "plane",
                 "size": "0 0 0.1",
                 "rgba": "0.32 0.35 0.38 1",
-                "friction": "0.8 0.6 0.001",
+                "friction": MUJOCO_CONTACT_FRICTION,
                 "condim": "3",
                 "solref": "0.005 1",
                 "solimp": "0.95 0.99 0.001",
@@ -537,6 +537,53 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
             },
         )
     worldbody.insert(2, target_frame)
+
+    # Render the measured link6 pose with the same RGB coordinate frame as
+    # the command target. Sites are visual only and move with link6.
+    eef_frame = worldbody.find(".//body[@name='link6']")
+    if eef_frame is None:
+        raise ValueError("link6 body is missing from MJCF")
+    ET.SubElement(
+        eef_frame,
+        "site",
+        {
+            "name": "current_eef",
+            "type": "sphere",
+            "size": "0.012",
+            "rgba": "1 1 1 0.9",
+            "group": "0",
+        },
+    )
+    for name, endpoint, color in (
+        ("current_eef_x", "0.16 0 0", "1 0.12 0.05 1"),
+        ("current_eef_y", "0 0.16 0", "0.1 0.9 0.2 1"),
+        ("current_eef_z", "0 0 0.16", "0.1 0.35 1 1"),
+    ):
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": name,
+                "type": "capsule",
+                "fromto": f"0 0 0 {endpoint}",
+                "size": "0.007",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": f"{name}_tip",
+                "type": "sphere",
+                "pos": endpoint,
+                "size": "0.014",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+
     xml = ET.tostring(root, encoding="unicode")
     return mujoco.MjModel.from_xml_string(xml)
 
@@ -689,7 +736,7 @@ class Sim2Sim:
             raise ValueError("One or more joint motors are missing from the MJCF")
 
         self.base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
-        self.ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, EEF_SITE_NAME)
+        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "link6")
         self.target_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "command_target")
         target_frame_body_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_BODY, "command_target_frame"
@@ -700,7 +747,7 @@ class Sim2Sim:
         self.imu_sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, "imu_gyro")
         if min(
             self.base_body_id,
-            self.ee_site_id,
+            self.ee_body_id,
             self.target_site_id,
             self.target_mocap_id,
             self.imu_sensor_id,
@@ -710,7 +757,7 @@ class Sim2Sim:
         mujoco.mj_resetData(model, self.data)
         root_adr = model.joint("root").qposadr[0]
         self.data.qpos[root_adr : root_adr + 7] = [0.0, 0.0, base_height, 1.0, 0.0, 0.0, 0.0]
-        self.data.qpos[self.joint_qpos_adr] = DEFAULT_JOINT_POS
+        self.data.qpos[self.joint_qpos_adr] = ISAAC_RESET_JOINT_POS
         self.data.qvel[:] = 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(model, self.data)
@@ -718,7 +765,11 @@ class Sim2Sim:
         self.raw_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.effective_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.last_action = np.zeros(ACTION_DIM, dtype=np.float64)
-        self.last_torque = np.zeros(ACTION_DIM, dtype=np.float64)
+        self.last_torque = np.clip(
+            -KP * ISAAC_RESET_JOINT_POS,
+            -TORQUE_LIMIT,
+            TORQUE_LIMIT,
+        )
         self.raw_desired_position = DEFAULT_JOINT_POS.copy()
         self.policy_desired_position = DEFAULT_JOINT_POS.copy()
         self.desired_position = DEFAULT_JOINT_POS.copy()
@@ -739,8 +790,8 @@ class Sim2Sim:
 
     def ee_pose_base(self) -> tuple[np.ndarray, np.ndarray]:
         base_position, base_rotation = self.base_pose()
-        ee_position_world = self.data.site_xpos[self.ee_site_id]
-        ee_rotation_world = self.data.site_xmat[self.ee_site_id].reshape(3, 3)
+        ee_position_world = self.data.xpos[self.ee_body_id]
+        ee_rotation_world = self.data.xmat[self.ee_body_id].reshape(3, 3)
         position = base_rotation.T @ (ee_position_world - base_position)
         rotation = base_rotation.T @ ee_rotation_world
         return position, rotation
@@ -784,12 +835,11 @@ class Sim2Sim:
     def contact_observation(self) -> np.ndarray:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_torque,
                 self.pose_6d(ee_position, ee_rotation),
@@ -803,13 +853,12 @@ class Sim2Sim:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
         target_position, target_rotation = self.target_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
                 self.pose_6d(target_position, target_rotation),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_action,
                 self.pose_6d(ee_position, ee_rotation),
@@ -818,7 +867,7 @@ class Sim2Sim:
         )
         if observation.shape != (OBS_DIM,):
             raise RuntimeError(f"Policy observation has shape {observation.shape}")
-        return np.clip(observation, -100.0, 100.0)
+        return observation
 
     def _initial_se3_distance(self) -> float:
         ee_position, ee_rotation = self.ee_pose_base()
@@ -864,12 +913,9 @@ class Sim2Sim:
     def apply_pd(self, *, policy_updated: bool = False) -> None:
         position, velocity = self.joint_state()
         if policy_updated:
-            # Same torque-aware action clamp used by SolefootController.cpp.
-            action_min = position - DEFAULT_JOINT_POS + (KD * velocity - TORQUE_LIMIT) / KP
-            action_max = position - DEFAULT_JOINT_POS + (KD * velocity + TORQUE_LIMIT) / KP
-            self.effective_action = np.clip(self.raw_action, action_min, action_max)
-            self.raw_desired_position = DEFAULT_JOINT_POS + self.raw_action
-            self.policy_desired_position = DEFAULT_JOINT_POS + self.effective_action
+            scaled_action = self.raw_action * ACTION_SCALE
+            self.raw_desired_position = DEFAULT_JOINT_POS + scaled_action
+            self.policy_desired_position = self.raw_desired_position.copy()
 
             command = self.policy_desired_position.copy()
             if self.arm_max_step > 0.0:
@@ -885,11 +931,11 @@ class Sim2Sim:
                     self._previous_policy_command[LEG_IDS] + self.max_leg_step,
                 )
             self.desired_position = command
+            self.effective_action = command - DEFAULT_JOINT_POS
             self.policy_command_step = command - self._previous_policy_command
             self._previous_policy_command = command.copy()
-            # The policy observes the command that was actually applied, just
-            # like record_applied_targets() in the real deployment script.
-            self.last_action = command - DEFAULT_JOINT_POS
+            # mdp.last_action exposes the raw action-manager input in training.
+            self.last_action = self.raw_action.copy()
 
         torque = KP * (self.desired_position - position) - KD * velocity
         torque = np.clip(torque, -TORQUE_LIMIT, TORQUE_LIMIT)

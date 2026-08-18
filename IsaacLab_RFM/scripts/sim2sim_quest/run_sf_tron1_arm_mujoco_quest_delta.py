@@ -3,8 +3,8 @@
 
 The inference chain matches the IsaacLab/RSL-RL export:
 
-    10 x 55 contact observations -> contactNet -> GRU -> 67-D latent
-    65-D policy observation + 67-D latent -> actor -> 14 joint targets
+    10 x 57 contact observations -> contactNet -> GRU -> 67-D latent
+    67-D policy observation + 67-D latent -> actor -> 14 joint targets
 
 Hold the right-controller Grip button to control end-effector position:
 
@@ -14,8 +14,9 @@ Hold the left-controller Grip button to control end-effector orientation:
 
     target_rotation = controller_rotation_delta @ ee_rotation_at_grip_press
 
-The right-controller front Trigger controls the simulated gripper
-continuously: released is open and fully pressed is closed.
+The current URDF represents the UMI gripper as fixed geometry. The right
+controller front Trigger is therefore accepted only for input compatibility;
+it does not add untrained gripper degrees of freedom to the model.
 
 The original sim2sim script is intentionally left unchanged.
 """
@@ -25,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import pickle
 import subprocess
 import sys
@@ -40,11 +42,7 @@ import onnxruntime as ort
 
 
 SCRIPT_PATH = Path(__file__).resolve()
-PROJECT_ROOT = SCRIPT_PATH.parent
-if (PROJECT_ROOT / "IsaacLab_RFM").is_dir():
-    ISAACLAB_ROOT = PROJECT_ROOT / "IsaacLab_RFM"
-else:
-    ISAACLAB_ROOT = SCRIPT_PATH.parents[2]
+ISAACLAB_ROOT = SCRIPT_PATH.parents[2]
 REPO_ROOT = ISAACLAB_ROOT.parent
 
 DEFAULT_MJCF = (
@@ -56,17 +54,14 @@ DEPLOYED_MODEL_DIR = (
     / "tron1_ws/src/tron1-rl-deploy-arm/src/robot_controllers/config/"
     "pointfoot/SF_TRON1A_ARX5ARM/policy"
 )
+WBC_LOG_ROOT = Path(os.environ.get("WBC_LOG_ROOT", "/media/edwin/ChenJing26/WBC_logs"))
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
 DEFAULT_QUEST_BRIDGE = Path(
     "/home/phi5090ii/steamvr/build/quest_controller_bridge"
 )
-# Training tracks eef_link 0.15 m forward along the link6 X axis.
-# Do not add the same offset again during trajectory conversion.
+# Training tracks the URDF's J6 child body link6 directly.
 TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
 TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
-EEF_SITE_NAME = "eef_link"
-EEF_SITE_POS = "0.15 0 0"
-EEF_SITE_QUAT = "1 0 0 0"
 
 # OpenVR is X-right, Y-up, Z-backward. The robot base convention used here is
 # X-forward, Y-left, Z-up. This is a proper rotation (determinant +1).
@@ -79,8 +74,7 @@ ROBOT_FROM_OPENVR = np.array(
     dtype=np.float64,
 )
 
-# This order must match PointfootCfg.init_state.joint_names and the training
-# articulation order. It is intentionally not MuJoCo's internal joint order.
+# Isaac Lab articulation/action order measured from the training environment.
 JOINT_NAMES = (
     "abad_L_Joint",
     "abad_R_Joint",
@@ -110,10 +104,16 @@ LEG_NAMES = (
 ARM_NAMES = ("J1", "J2", "J3", "J4", "J5", "J6")
 LEG_IDS = np.array([JOINT_NAMES.index(name) for name in LEG_NAMES], dtype=int)
 ARM_IDS = np.array([JOINT_NAMES.index(name) for name in ARM_NAMES], dtype=int)
+ACTION_SCALE = np.array(
+    [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.3, 0.6, 0.6, 0.3, 0.3, 0.2, 0.2, 0.2],
+    dtype=np.float64,
+)
 DEFAULT_JOINT_POS = np.array(
     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
 )
+ISAAC_RESET_JOINT_POS = DEFAULT_JOINT_POS.copy()
+ISAAC_RESET_JOINT_POS[JOINT_NAMES.index("J3")] = 0.065
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
@@ -136,23 +136,13 @@ PHYSICS_DT = 0.001
 POLICY_DECIMATION = 20
 POLICY_DT = PHYSICS_DT * POLICY_DECIMATION
 HISTORY_LENGTH = 10
-OBS_DIM = 65
-CONTACT_OBS_DIM = 55
+OBS_DIM = 67
+CONTACT_OBS_DIM = 57
 ACTION_DIM = 14
-SIM_GRIPPER_MAX_ANGLE = 0.925
-SIM_GRIPPER_JOINT_NAMES = (
-    "assembly_DAS_Controller_V3_with_flange_joint1",
-    "assembly_DAS_Controller_V3_with_flange_joint2",
-    "assembly_DAS_Controller_V3_with_flange_joint3",
-    "assembly_DAS_Controller_V3_with_flange_joint4",
-    "assembly_DAS_Controller_V3_with_flange_joint5",
-    "assembly_DAS_Controller_V3_with_flange_joint6",
-)
-SIM_GRIPPER_JOINT_MULTIPLIERS = np.array(
-    [1.0, -1.0, -1.0, 1.0, 1.0, -1.0],
-    dtype=np.float64,
-)
-SIM_GRIPPER_ACTUATOR_NAME = "sim_gripper_position"
+# MuJoCo friction is (sliding, torsional, rolling), not static/dynamic/rolling.
+# Training randomizes static friction in [0.7, 1.3] and dynamic friction in
+# [0.6, 1.2]. Their shared midpoint, 0.9, is the deterministic parity value.
+MUJOCO_CONTACT_FRICTION = "0.9 0.005 0.0001"
 
 
 def format_named(names: tuple[str, ...], values: np.ndarray) -> str:
@@ -175,7 +165,7 @@ def parse_args() -> argparse.Namespace:
         "--model-dir",
         type=Path,
         help="Directory containing actor.onnx, contactNet.onnx and gru.onnx. "
-        "Default: newest exported training run.",
+        "Default: newest exported run under WBC_LOG_ROOT, then the legacy local log.",
     )
     parser.add_argument(
         "--duration",
@@ -184,12 +174,21 @@ def parse_args() -> argparse.Namespace:
         help="Simulation duration in seconds; 0 runs until the viewer closes "
         "(default: 30 s).",
     )
-    parser.add_argument("--base-height", type=float, default=0.84)
-    parser.add_argument(
+    parser.add_argument("--base-height", type=float, default=0.8)
+    latent_group = parser.add_mutually_exclusive_group()
+    latent_group.add_argument(
         "--sample-latent",
+        dest="sample_latent",
         action="store_true",
-        help="Sample the predicted latent distribution instead of using its mean.",
+        help="Sample the predicted latent distribution (default; matches training).",
     )
+    latent_group.add_argument(
+        "--mean-latent",
+        dest="sample_latent",
+        action="store_false",
+        help="Use the latent mean for deterministic diagnostics.",
+    )
+    parser.set_defaults(sample_latent=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-realtime", action="store_true")
@@ -234,6 +233,14 @@ def parse_args() -> argparse.Namespace:
         default=0.15,
         help="Stop Quest control after this many seconds without data (default: 0.15).",
     )
+    parser.add_argument(
+        "--record-output",
+        type=Path,
+        help=(
+            "Record the 50 Hz Quest command and measured robot state to an NPZ file. "
+            "A replayable target-trajectory PKL with the same stem is also written."
+        ),
+    )
     parser.add_argument("--log-interval", type=float, default=1.0)
     parser.add_argument(
         "--leg-debug",
@@ -256,14 +263,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def newest_exported_model_dir() -> Path:
-    log_root = ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm"
+    log_roots = (
+        WBC_LOG_ROOT,
+        ISAACLAB_ROOT / "logs/rsl_rl/ImplicitOneStageARXR5Arm",
+    )
     candidates = [
         path
+        for log_root in log_roots
         for path in log_root.glob("*/exported")
         if all((path / name).is_file() for name in ("actor.onnx", "contactNet.onnx", "gru.onnx"))
     ]
     if candidates:
-        return max(candidates, key=lambda path: path.parent.name)
+        return max(candidates, key=lambda path: (path.parent.stat().st_mtime_ns, path.parent.name))
     return DEPLOYED_MODEL_DIR
 
 
@@ -333,6 +344,28 @@ def rotation_from_quaternion_xyzw(quaternion: np.ndarray) -> np.ndarray:
 def rotation_angle(rotation: np.ndarray) -> float:
     cosine = np.clip((np.trace(rotation) - 1.0) * 0.5, -1.0, 1.0)
     return float(math.acos(float(cosine)))
+
+
+def axis_angle_from_rotation(rotation: np.ndarray) -> np.ndarray:
+    """Convert a rotation matrix to an axis-angle vector."""
+    cosine = float(np.clip((np.trace(rotation) - 1.0) * 0.5, -1.0, 1.0))
+    angle = math.acos(cosine)
+    if angle < 1.0e-9:
+        return np.zeros(3, dtype=np.float64)
+    if math.pi - angle < 1.0e-5:
+        eigenvalues, eigenvectors = np.linalg.eig(rotation)
+        axis = np.real(eigenvectors[:, np.argmin(np.abs(eigenvalues - 1.0))])
+        axis /= np.linalg.norm(axis)
+        return axis * angle
+    axis = np.array(
+        [
+            rotation[2, 1] - rotation[1, 2],
+            rotation[0, 2] - rotation[2, 0],
+            rotation[1, 0] - rotation[0, 1],
+        ],
+        dtype=np.float64,
+    ) / (2.0 * math.sin(angle))
+    return axis * angle
 
 
 def rotation_from_axis_angle(axis_angle: np.ndarray) -> np.ndarray:
@@ -434,7 +467,7 @@ class PickleTrajectory:
 
         new_cycle = self.command_origin is None or cycle != self.current_cycle
         if new_cycle:
-            self.command_origin = simulation.data.site_xpos[simulation.ee_site_id].copy()
+            self.command_origin = simulation.data.xpos[simulation.ee_body_id].copy()
             self.current_cycle = cycle
             self.finished_message_printed = False
             print(
@@ -512,9 +545,9 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
             "type": "2d",
             "builtin": "checker",
             "mark": "edge",
-            "rgb1": "0.10 0.22 0.36",
-            "rgb2": "0.22 0.40 0.58",
-            "markrgb": "0.60 0.72 0.82",
+            "rgb1": "0.12 0.25 0.38",
+            "rgb2": "0.24 0.42 0.58",
+            "markrgb": "0.55 0.68 0.78",
             "width": "512",
             "height": "512",
         },
@@ -527,35 +560,13 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
             "texture": "sim2sim_checker_texture",
             "texrepeat": "5 5",
             "texuniform": "true",
-            "reflectance": "0.25",
+            "reflectance": "0.15",
         },
     )
 
     worldbody = root.find("worldbody")
     if worldbody is None:
         raise ValueError("MJCF has no worldbody")
-    link6_body = worldbody.find(".//body[@name='link6']")
-    if link6_body is None:
-        raise ValueError("MJCF has no link6 body for eef_link site attachment")
-    eef_site = link6_body.find(f"./site[@name='{EEF_SITE_NAME}']")
-    if eef_site is None:
-        ET.SubElement(
-            link6_body,
-            "site",
-            {
-                "name": EEF_SITE_NAME,
-                "pos": EEF_SITE_POS,
-                "quat": EEF_SITE_QUAT,
-                "size": "0.012",
-                "rgba": "1 0.8 0.05 0.9",
-                "group": "0",
-            },
-        )
-    else:
-        # Match the eef_link offset used by the IsaacLab training URDF.
-        eef_site.set("pos", EEF_SITE_POS)
-        eef_site.set("quat", EEF_SITE_QUAT)
-        eef_site.set("rgba", "0 0 0 0")
     worldbody.insert(
         0,
         ET.Element(
@@ -565,7 +576,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
                 "type": "plane",
                 "size": "0 0 0.1",
                 "material": "sim2sim_checker_material",
-                "friction": "0.8 0.6 0.001",
+                "friction": MUJOCO_CONTACT_FRICTION,
                 "condim": "3",
                 "solref": "0.005 1",
                 "solimp": "0.95 0.99 0.001",
@@ -583,7 +594,7 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
     # Fixed frame plus a physical door panel that swings about a vertical
     # hinge. It sits in front of the robot and can be pushed or grasped.
     contact_parameters = {
-        "friction": "0.8 0.1 0.001",
+        "friction": MUJOCO_CONTACT_FRICTION,
         "condim": "3",
         "solref": "0.005 1",
         "solimp": "0.95 0.99 0.001",
@@ -724,104 +735,56 @@ def load_sim_model(mjcf_path: Path) -> mujoco.MjModel:
         )
     worldbody.insert(2, target_frame)
 
-    # The checked-in MJCF locks the DAS gripper. Restore the six revolute
-    # joints from the original robot-description revision. Joint 1 is the
-    # driver; joints 2-6 follow the original URDF mimic relationships.
-    gripper_joint_specs = (
-        ("assembly_DAS_Controller_V3_with_flange_link1", SIM_GRIPPER_JOINT_NAMES[0], 0.0, 0.925),
-        ("assembly_DAS_Controller_V3_with_flange_link2", SIM_GRIPPER_JOINT_NAMES[1], -0.925, 0.0),
-        ("assembly_DAS_Controller_V3_with_flange_link3", SIM_GRIPPER_JOINT_NAMES[2], -0.925, 0.0),
-        ("assembly_DAS_Controller_V3_with_flange_link4", SIM_GRIPPER_JOINT_NAMES[3], 0.0, 0.925),
-        ("assembly_DAS_Controller_V3_with_flange_link5", SIM_GRIPPER_JOINT_NAMES[4], 0.0, 0.925),
-        ("assembly_DAS_Controller_V3_with_flange_link6", SIM_GRIPPER_JOINT_NAMES[5], -0.925, 0.0),
+    # Show the measured end-effector pose in exactly the same coordinate-frame
+    # form as the command target. These sites are attached to link6, so
+    # MuJoCo updates them automatically with the robot state and they remain
+    # purely visual (no added mass or collision geometry).
+    eef_frame = worldbody.find(".//body[@name='link6']")
+    if eef_frame is None:
+        raise ValueError("link6 body is missing from MJCF")
+    ET.SubElement(
+        eef_frame,
+        "site",
+        {
+            "name": "current_eef",
+            "type": "sphere",
+            "size": "0.012",
+            "rgba": "1 1 1 0.9",
+            "group": "0",
+        },
     )
-    available_gripper_joint_names: list[str] = []
-    for body_name, joint_name, lower, upper in gripper_joint_specs:
-        body = worldbody.find(f".//body[@name='{body_name}']")
-        if body is None:
-            continue
-        joint = ET.Element(
-            "joint",
-            {
-                "name": joint_name,
-                "type": "hinge",
-                "axis": "0 0 -1",
-                "limited": "true",
-                "range": f"{lower} {upper}",
-                "damping": "0.1",
-                "armature": "0.001",
-            },
-        )
-        # Keep the conventional inertial -> joint -> geom ordering.
-        body.insert(1 if body.find("inertial") is not None else 0, joint)
-        available_gripper_joint_names.append(joint_name)
-
-    equality = root.find("equality")
-    if equality is None:
-        equality = ET.SubElement(root, "equality")
-    for joint_name, multiplier in zip(
-        SIM_GRIPPER_JOINT_NAMES[1:],
-        SIM_GRIPPER_JOINT_MULTIPLIERS[1:],
+    for name, endpoint, color in (
+        ("current_eef_x", "0.16 0 0", "1 0.12 0.05 1"),
+        ("current_eef_y", "0 0.16 0", "0.1 0.9 0.2 1"),
+        ("current_eef_z", "0 0 0.16", "0.1 0.35 1 1"),
     ):
-        if (
-            SIM_GRIPPER_JOINT_NAMES[0] not in available_gripper_joint_names
-            or joint_name not in available_gripper_joint_names
-        ):
-            continue
         ET.SubElement(
-            equality,
-            "joint",
+            eef_frame,
+            "site",
             {
-                "name": f"{joint_name}_mimic",
-                "joint1": joint_name,
-                "joint2": SIM_GRIPPER_JOINT_NAMES[0],
-                "polycoef": f"0 {multiplier} 0 0 0",
-                "solref": "0.002 1",
+                "name": name,
+                "type": "capsule",
+                "fromto": f"0 0 0 {endpoint}",
+                "size": "0.007",
+                "rgba": color,
+                "group": "0",
+            },
+        )
+        ET.SubElement(
+            eef_frame,
+            "site",
+            {
+                "name": f"{name}_tip",
+                "type": "sphere",
+                "pos": endpoint,
+                "size": "0.014",
+                "rgba": color,
+                "group": "0",
             },
         )
 
-    # The detailed CAD collision meshes overlap slightly at their pivots.
-    # Suppress only self-contact inside the gripper mechanism; contacts with
-    # objects in the scene remain enabled.
-    contact = root.find("contact")
-    if contact is None:
-        contact = ET.SubElement(root, "contact")
-    gripper_bodies = tuple(
-        body_name for body_name in (
-        "assembly_DAS_Controller_V3_with_flange",
-        "assembly_DAS_Controller_V3_with_flange_link1",
-        "assembly_DAS_Controller_V3_with_flange_link2",
-        "assembly_DAS_Controller_V3_with_flange_link3",
-        "assembly_DAS_Controller_V3_with_flange_link4",
-        "assembly_DAS_Controller_V3_with_flange_link5",
-        "assembly_DAS_Controller_V3_with_flange_link6",
-        ) if worldbody.find(f".//body[@name='{body_name}']") is not None
-    )
-    for first_index, first_body in enumerate(gripper_bodies):
-        for second_body in gripper_bodies[first_index + 1 :]:
-            ET.SubElement(
-                contact,
-                "exclude",
-                {"body1": first_body, "body2": second_body},
-            )
-
-    actuator = root.find("actuator")
-    if actuator is None:
-        actuator = ET.SubElement(root, "actuator")
-    if SIM_GRIPPER_JOINT_NAMES[0] in available_gripper_joint_names:
-        ET.SubElement(
-            actuator,
-            "position",
-            {
-                "name": SIM_GRIPPER_ACTUATOR_NAME,
-                "joint": SIM_GRIPPER_JOINT_NAMES[0],
-                "kp": "20",
-                "ctrllimited": "true",
-                "ctrlrange": f"0 {SIM_GRIPPER_MAX_ANGLE}",
-                "forcelimited": "true",
-                "forcerange": "-10 10",
-            },
-        )
+    # The current assembly.urdf defines the UMI gripper as fixed link6
+    # geometry. Do not recreate the obsolete six-DoF DAS gripper at runtime.
 
     xml = ET.tostring(root, encoding="unicode")
     return mujoco.MjModel.from_xml_string(xml)
@@ -1177,7 +1140,6 @@ class Sim2Sim:
         base_height: float,
         arm_max_step: float,
         max_leg_step: float,
-        se3_decrease_velocity: float,
     ):
         self.model = model
         self.data = mujoco.MjData(model)
@@ -1191,7 +1153,6 @@ class Sim2Sim:
             raise ValueError("--max-leg-step must be finite and non-negative")
         self.arm_max_step = float(arm_max_step)
         self.max_leg_step = float(max_leg_step)
-        self.se3_decrease_velocity = float(se3_decrease_velocity)
 
         self.joint_qpos_adr = np.array([model.joint(name).qposadr[0] for name in JOINT_NAMES], dtype=int)
         self.joint_dof_adr = np.array([model.joint(name).dofadr[0] for name in JOINT_NAMES], dtype=int)
@@ -1201,21 +1162,10 @@ class Sim2Sim:
         )
         if np.any(self.motor_ids < 0):
             raise ValueError("One or more joint motors are missing from the MJCF")
-        self.gripper_actuator_id = mujoco.mj_name2id(
-            model,
-            mujoco.mjtObj.mjOBJ_ACTUATOR,
-            SIM_GRIPPER_ACTUATOR_NAME,
-        )
-        self.gripper_joint_qpos_adr = (
-            np.array([model.joint(name).qposadr[0] for name in SIM_GRIPPER_JOINT_NAMES], dtype=int)
-            if self.gripper_actuator_id >= 0
-            else np.empty(0, dtype=int)
-        )
         self.gripper_trigger = 0.0
-        self.gripper_target = 0.0
 
         self.base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
-        self.ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, EEF_SITE_NAME)
+        self.ee_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "link6")
         self.target_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "command_target")
         target_frame_body_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_BODY, "command_target_frame"
@@ -1226,7 +1176,7 @@ class Sim2Sim:
         self.imu_sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, "imu_gyro")
         if min(
             self.base_body_id,
-            self.ee_site_id,
+            self.ee_body_id,
             self.target_site_id,
             self.target_mocap_id,
             self.imu_sensor_id,
@@ -1236,7 +1186,7 @@ class Sim2Sim:
         mujoco.mj_resetData(model, self.data)
         root_adr = model.joint("root").qposadr[0]
         self.data.qpos[root_adr : root_adr + 7] = [0.0, 0.0, base_height, 1.0, 0.0, 0.0, 0.0]
-        self.data.qpos[self.joint_qpos_adr] = DEFAULT_JOINT_POS
+        self.data.qpos[self.joint_qpos_adr] = ISAAC_RESET_JOINT_POS
         self.data.qvel[:] = 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(model, self.data)
@@ -1244,9 +1194,11 @@ class Sim2Sim:
         self.raw_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.effective_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.last_action = np.zeros(ACTION_DIM, dtype=np.float64)
-        self.last_torque = np.zeros(ACTION_DIM, dtype=np.float64)
-        self.torque_saturation_counts = np.zeros(ACTION_DIM, dtype=np.int64)
-        self.torque_samples = 0
+        self.last_torque = np.clip(
+            -KP * ISAAC_RESET_JOINT_POS,
+            -TORQUE_LIMIT,
+            TORQUE_LIMIT,
+        )
         self.raw_desired_position = DEFAULT_JOINT_POS.copy()
         self.policy_desired_position = DEFAULT_JOINT_POS.copy()
         self.desired_position = DEFAULT_JOINT_POS.copy()
@@ -1266,16 +1218,14 @@ class Sim2Sim:
         return position, rotation
 
     def ee_pose_base(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return the EE pose expressed entirely in the robot base frame."""
         base_position, base_rotation = self.base_pose()
-        ee_position_world = self.data.site_xpos[self.ee_site_id]
-        ee_rotation_world = self.data.site_xmat[self.ee_site_id].reshape(3, 3)
+        ee_position_world = self.data.xpos[self.ee_body_id]
+        ee_rotation_world = self.data.xmat[self.ee_body_id].reshape(3, 3)
         position = base_rotation.T @ (ee_position_world - base_position)
         rotation = base_rotation.T @ ee_rotation_world
         return position, rotation
 
     def target_pose_base(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return the target pose expressed entirely in the robot base frame."""
         if self.command_frame == "base":
             return self.target_position, self.target_rotation
         base_position, base_rotation = self.base_pose()
@@ -1314,12 +1264,11 @@ class Sim2Sim:
     def contact_observation(self) -> np.ndarray:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_torque,
                 self.pose_6d(ee_position, ee_rotation),
@@ -1333,13 +1282,12 @@ class Sim2Sim:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
         target_position, target_rotation = self.target_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
                 self.pose_6d(target_position, target_rotation),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_action,
                 self.pose_6d(ee_position, ee_rotation),
@@ -1348,7 +1296,7 @@ class Sim2Sim:
         )
         if observation.shape != (OBS_DIM,):
             raise RuntimeError(f"Policy observation has shape {observation.shape}")
-        return np.clip(observation, -100.0, 100.0)
+        return observation
 
     def _initial_se3_distance(self) -> float:
         ee_position, ee_rotation = self.ee_pose_base()
@@ -1385,33 +1333,25 @@ class Sim2Sim:
         self._update_target_marker()
 
     def set_gripper_trigger(self, trigger: float) -> None:
-        """Map the Quest front trigger [0, 1] to the gripper driver angle."""
+        """Keep Quest input compatibility; the current URDF gripper is fixed."""
         self.gripper_trigger = float(np.clip(trigger, 0.0, 1.0))
-        self.gripper_target = self.gripper_trigger * SIM_GRIPPER_MAX_ANGLE
 
     def gripper_position(self) -> float:
-        """Return the simulated driver-joint angle in radians."""
-        if self.gripper_joint_qpos_adr.size == 0:
-            return 0.0
-        return float(self.data.qpos[self.gripper_joint_qpos_adr[0]])
+        """The current URDF has no gripper DoF."""
+        return 0.0
 
     def infer(self) -> None:
         contact_obs = self.contact_observation()
         self.history.append(contact_obs)
         history = np.stack(self.history, axis=0)
         self.raw_action = self.policy(self.policy_observation(), history)
-        self.se3_distance_reference = max(
-            0.0,
-            self.se3_distance_reference - self.se3_decrease_velocity * POLICY_DT,
-        )
+        self.se3_distance_reference = max(0.0, self.se3_distance_reference - POLICY_DT)
 
     def apply_pd(self, *, policy_updated: bool = False) -> None:
         position, velocity = self.joint_state()
         if policy_updated:
-            # Match Isaac Lab JointPositionActionCfg: the raw actor action is the
-            # position-target offset. Effort limiting happens only after PD.
-            self.effective_action = self.raw_action.copy()
-            self.raw_desired_position = DEFAULT_JOINT_POS + self.raw_action
+            scaled_action = self.raw_action * ACTION_SCALE
+            self.raw_desired_position = DEFAULT_JOINT_POS + scaled_action
             self.policy_desired_position = self.raw_desired_position.copy()
 
             command = self.policy_desired_position.copy()
@@ -1428,20 +1368,17 @@ class Sim2Sim:
                     self._previous_policy_command[LEG_IDS] + self.max_leg_step,
                 )
             self.desired_position = command
+            self.effective_action = command - DEFAULT_JOINT_POS
             self.policy_command_step = command - self._previous_policy_command
             self._previous_policy_command = command.copy()
-            # Isaac Lab mdp.last_action is the previous raw policy action.
+            # mdp.last_action exposes the raw action-manager input in training.
             self.last_action = self.raw_action.copy()
 
-        unclipped_torque = KP * (self.desired_position - position) - KD * velocity
-        self.torque_saturation_counts += np.abs(unclipped_torque) >= TORQUE_LIMIT
-        self.torque_samples += 1
-        torque = np.clip(unclipped_torque, -TORQUE_LIMIT, TORQUE_LIMIT)
+        torque = KP * (self.desired_position - position) - KD * velocity
+        torque = np.clip(torque, -TORQUE_LIMIT, TORQUE_LIMIT)
 
         self.data.ctrl[:] = 0.0
         self.data.ctrl[self.motor_ids] = torque
-        if self.gripper_actuator_id >= 0:
-            self.data.ctrl[self.gripper_actuator_id] = self.gripper_target
         self.last_torque = torque
 
     def step(self, physics_step: int) -> None:
@@ -1486,6 +1423,24 @@ def run(args: argparse.Namespace) -> None:
     command = np.zeros(6, dtype=np.float64)
     command_frame = "base"
 
+    record_output: Path | None = None
+    record_trajectory_output: Path | None = None
+    if args.record_output is not None:
+        record_output = args.record_output.expanduser().resolve()
+        if record_output.suffix.lower() != ".npz":
+            raise ValueError("--record-output must end in .npz")
+        record_trajectory_output = record_output.with_suffix(".pkl")
+        existing = [
+            path
+            for path in (record_output, record_trajectory_output)
+            if path.exists()
+        ]
+        if existing:
+            raise FileExistsError(
+                "Refusing to overwrite an existing recording: "
+                + ", ".join(str(path) for path in existing)
+            )
+
     model_dir = args.model_dir or newest_exported_model_dir()
     rng = np.random.default_rng(args.seed)
 
@@ -1493,7 +1448,7 @@ def run(args: argparse.Namespace) -> None:
     print(f"[sim2sim] ONNX: {model_dir.expanduser().resolve()}")
     print("[quest] Right Grip: XYZ position control")
     print("[quest] Left Grip: roll/pitch/yaw orientation control")
-    print("[quest] Right front Trigger: 0=open, 1=closed (analog gripper control)")
+    print("[quest] Right front Trigger is ignored: the current URDF gripper is fixed.")
     print(
         "[quest] OpenVR -> base: "
         "dx=-dVR_z (forward), dy=-dVR_x (left), dz=dVR_y (up)"
@@ -1518,9 +1473,9 @@ def run(args: argparse.Namespace) -> None:
         args.base_height,
         args.arm_max_step,
         args.max_leg_step,
-        1.0,
     )
     initial_ee_position, initial_ee_rotation = simulation.ee_pose_base()
+    initial_ee_position[0] += 0.15
     simulation.set_target(
         initial_ee_position,
         initial_ee_rotation,
@@ -1530,6 +1485,33 @@ def run(args: argparse.Namespace) -> None:
         "[quest] Initial hold target EE(base)="
         f"{initial_ee_position.round(4).tolist()}"
     )
+
+    record: dict[str, list] = {
+        "time": [],
+        "target_position_base": [],
+        "target_rotation_base": [],
+        "measured_position_base": [],
+        "measured_rotation_base": [],
+        "target_position_world": [],
+        "target_rotation_world": [],
+        "measured_position_world": [],
+        "measured_rotation_world": [],
+        "base_position_world": [],
+        "base_rotation_world": [],
+        "joint_position": [],
+        "joint_velocity": [],
+        "joint_torque": [],
+        "raw_action": [],
+        "effective_action": [],
+        "right_active": [],
+        "left_active": [],
+        "right_position_delta_base": [],
+        "left_rotation_delta_base": [],
+        "right_trigger": [],
+    }
+    if record_output is not None:
+        print(f"[record] 50 Hz raw output: {record_output}")
+        print(f"[record] replay trajectory: {record_trajectory_output}")
 
     quest = QuestDeltaController(
         args.quest_bridge,
@@ -1569,7 +1551,8 @@ def run(args: argparse.Namespace) -> None:
         last_log_sim = simulation.data.time
         viewer_sync_count = 0
         while physics_step < max_steps and (viewer_handle is None or viewer_handle.is_running()):
-            if physics_step % POLICY_DECIMATION == 0:
+            policy_updated = physics_step % POLICY_DECIMATION == 0
+            if policy_updated:
                 (
                     right_active,
                     right_position_delta,
@@ -1660,6 +1643,43 @@ def run(args: argparse.Namespace) -> None:
                 left_active_previous = left_active
 
             simulation.step(physics_step)
+            if policy_updated and record_output is not None:
+                target_position_base, target_rotation_base = simulation.target_pose_base()
+                measured_position_base, measured_rotation_base = simulation.ee_pose_base()
+                target_position_world, target_rotation_world = simulation.target_pose_world()
+                measured_position_world = simulation.data.xpos[
+                    simulation.ee_body_id
+                ].copy()
+                measured_rotation_world = simulation.data.xmat[
+                    simulation.ee_body_id
+                ].reshape(3, 3).copy()
+                base_position_world, base_rotation_world = simulation.base_pose()
+                joint_position, joint_velocity = simulation.joint_state()
+                record["time"].append(float(simulation.data.time))
+                record["target_position_base"].append(target_position_base.copy())
+                record["target_rotation_base"].append(target_rotation_base.copy())
+                record["measured_position_base"].append(measured_position_base.copy())
+                record["measured_rotation_base"].append(measured_rotation_base.copy())
+                record["target_position_world"].append(target_position_world.copy())
+                record["target_rotation_world"].append(target_rotation_world.copy())
+                record["measured_position_world"].append(measured_position_world)
+                record["measured_rotation_world"].append(measured_rotation_world)
+                record["base_position_world"].append(base_position_world)
+                record["base_rotation_world"].append(base_rotation_world)
+                record["joint_position"].append(joint_position)
+                record["joint_velocity"].append(joint_velocity)
+                record["joint_torque"].append(simulation.last_torque.copy())
+                record["raw_action"].append(simulation.raw_action.copy())
+                record["effective_action"].append(simulation.effective_action.copy())
+                record["right_active"].append(bool(right_active))
+                record["left_active"].append(bool(left_active))
+                record["right_position_delta_base"].append(
+                    right_position_delta.copy()
+                )
+                record["left_rotation_delta_base"].append(
+                    left_rotation_delta.copy()
+                )
+                record["right_trigger"].append(float(right_trigger))
             physics_step += 1
             # Physics runs at 1 kHz, but synchronizing the GUI at 1 kHz makes
             # wall-clock time lag badly and looks like slow motion.
@@ -1687,11 +1707,9 @@ def run(args: argparse.Namespace) -> None:
                     f"base_z={base_z:6.3f}  "
                     f"EE误差={pos_error:6.3f}m/{rot_error:6.3f}rad  "
                     f"|action|max={np.max(np.abs(simulation.last_action)):6.3f}  "
-                    f"arm_sat={np.max(simulation.torque_saturation_counts[ARM_IDS]) / max(simulation.torque_samples, 1) * 100:5.1f}%  "
                     f"target_xyz={target_position_base.round(3).tolist()}  "
                     f"target_rpy={target_rpy.round(3).tolist()}  "
-                    f"trigger={simulation.gripper_trigger:.2f}  "
-                    f"gripper_angle={simulation.gripper_position():.3f}rad"
+                    "gripper=fixed"
                 )
                 if args.leg_debug:
                     joint_position, _ = simulation.joint_state()
@@ -1720,6 +1738,44 @@ def run(args: argparse.Namespace) -> None:
                 last_log_sim = simulation.data.time
                 viewer_sync_count = 0
 
+    def save_recording() -> None:
+        if record_output is None or record_trajectory_output is None:
+            return
+        if not record["time"]:
+            print("[record] no policy samples were captured; no files written")
+            return
+        record_output.parent.mkdir(parents=True, exist_ok=True)
+        arrays = {key: np.asarray(values) for key, values in record.items()}
+        arrays["model_dir"] = np.array(str(model_dir.expanduser().resolve()))
+        arrays["sample_rate_hz"] = np.array(1.0 / POLICY_DT)
+        arrays["command_frame"] = np.array("base")
+        np.savez_compressed(record_output, **arrays)
+
+        relative_time = arrays["time"] - arrays["time"][0]
+        target_axis_angle = np.stack(
+            [axis_angle_from_rotation(rotation) for rotation in arrays["target_rotation_base"]]
+        )
+        episode = {
+            "t": relative_time,
+            "ee_pos": arrays["target_position_base"],
+            "ee_axis_angle": target_axis_angle,
+            "gripper_width": arrays["right_trigger"],
+            "metadata": {
+                "position_mode": "absolute_base",
+                "trajectory_name": record_output.stem,
+                "description": "Target pose recorded from Quest delta teleoperation",
+                "source_recording_npz": str(record_output),
+                "sample_rate_hz": 1.0 / POLICY_DT,
+            },
+        }
+        with record_trajectory_output.open("wb") as file:
+            pickle.dump([episode], file, protocol=pickle.HIGHEST_PROTOCOL)
+        print(
+            f"[record] saved {len(relative_time)} samples "
+            f"({relative_time[-1]:.2f} s) to {record_output}"
+        )
+        print(f"[record] saved replayable target trajectory to {record_trajectory_output}")
+
     try:
         if args.headless:
             if run_duration <= 0:
@@ -1739,6 +1795,7 @@ def run(args: argparse.Namespace) -> None:
         print("\n[sim2sim] 用户停止。")
     finally:
         quest.close()
+        save_recording()
 
     pos_error, rot_error = simulation.error()
     ee_position, _ = simulation.ee_pose_base()
@@ -1746,8 +1803,6 @@ def run(args: argparse.Namespace) -> None:
         f"[sim2sim] 结束：EE(base)={ee_position.tolist()}, "
         f"最终误差={pos_error:.4f} m / {rot_error:.4f} rad"
     )
-    arm_sat = simulation.torque_saturation_counts[ARM_IDS] / max(simulation.torque_samples, 1) * 100.0
-    print(f"[sim2sim] J1-J6 torque saturation: {dict(zip(ARM_NAMES, arm_sat.round(2)))} %")
 
 
 def main() -> int:

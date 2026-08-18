@@ -31,7 +31,18 @@ class WandbSummaryWriter(SummaryWriter):
         #         "Wandb username not found. Please run or add to ~/.bashrc: export WANDB_USERNAME=YOUR_USERNAME"
         #     )
 
-        wandb.init(project=project, mode=cfg["wandb_mode"], name=cfg["wandb_run_name"])
+        # Keep W&B's local transaction log alongside this training run.  This
+        # follows the runner's log_dir (the external WBC log drive by default)
+        # instead of creating a growing ``wandb/`` directory in the project
+        # working directory.  WANDB_DIR remains available as an explicit
+        # override for another machine or storage layout.
+        wandb_dir = os.environ.get("WANDB_DIR", log_dir)
+        wandb.init(
+            project=project,
+            mode=cfg["wandb_mode"],
+            name=cfg["wandb_run_name"],
+            dir=wandb_dir,
+        )
 
         # Change generated name to project-number format
         # wandb.run.name = project + wandb.run.name.split("-")[-1]

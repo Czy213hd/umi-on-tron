@@ -70,10 +70,10 @@ class CondOTPath:
 
 
 class FlowActor(nn.Module):
-    TASK_POLICY_OBS_DIM = 65
+    TASK_POLICY_OBS_DIM = 67
     COMMAND_POS_SLICE = slice(6, 9)
     COMMAND_ROT_SLICE = slice(9, 15)
-    COMMAND_DISTANCE_SLICE = slice(64, 65)
+    COMMAND_DISTANCE_SLICE = slice(66, 67)
 
     def __init__(
         self,

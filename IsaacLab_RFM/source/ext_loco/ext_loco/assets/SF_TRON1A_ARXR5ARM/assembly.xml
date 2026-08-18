@@ -1,32 +1,36 @@
 <?xml version='1.0' encoding='utf-8'?>
 <mujoco model="assembly">
   <compiler angle="radian" meshdir="meshes" autolimits="true" inertiafromgeom="false" />
-  <option timestep="0.001" gravity="0 0 -9.81" />
+  <option timestep="0.001" />
   <size njmax="500" nconmax="200" nuser_jnt="1" />
   <default>
     <default class="visual">
       <geom contype="0" conaffinity="0" group="2" density="0" />
     </default>
     <default class="collision">
-      <geom contype="1" conaffinity="1" group="3" condim="3" rgba="0.5 0.6 0.7 0" margin="0.001" />
+      <!-- MuJoCo friction = sliding, torsional, rolling (not static, dynamic, rolling).
+           Use the IsaacLab terrain's nominal sliding coefficient; training-side
+           rigid-body friction randomization remains unchanged. -->
+      <geom contype="1" conaffinity="1" group="3" condim="3" friction="1.0 0.005 0.0001" rgba="0.5 0.6 0.7 0" margin="0.001" />
     </default>
   </default>
   <asset>
-    <mesh name="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_base_link_arm" file="../models/meshes/L5_umi/arm/raw_meshes_ARM/base_link_arm.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link1" file="../models/meshes/L5_umi/arm/raw_meshes_ARM/link1.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link2" file="../models/meshes/L5_umi/arm/raw_meshes_ARM/link2.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link3" file="../models/meshes/L5_umi/arm/raw_meshes_ARM/link3.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link4" file="../models/meshes/L5_umi/arm/raw_meshes_ARM/link4.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link5" file="../models/meshes/L5_umi/arm/raw_meshes_ARM/link5.STL" />
-    <mesh name="urdf_models_meshes_DAS_Controller_v3_r5_end_adapter_flange" file="../models/meshes/DAS_Controller_v3_r5_end_adapter_flange.STL" scale="0.001 0.001 0.001" />
-    <mesh name="urdf_models_meshes_L5_umi_umi_link_Flange" file="../models/meshes/L5_umi/umi/link_Flange.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_umi_base_link" file="../models/meshes/L5_umi/umi/base_link.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_umi_link1" file="../models/meshes/L5_umi/umi/link1.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_umi_link3" file="../models/meshes/L5_umi/umi/link3.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_umi_link2" file="../models/meshes/L5_umi/umi/link2.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_umi_link4" file="../models/meshes/L5_umi/umi/link4.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_umi_link5" file="../models/meshes/L5_umi/umi/link5.STL" />
-    <mesh name="urdf_models_meshes_L5_umi_umi_link6" file="../models/meshes/L5_umi/umi/link6.STL" />
+    <!-- meshdir is ./meshes, hence the updated URDF model assets use ../models. -->
+    <mesh name="arxr5_base_link" file="../models/meshes/L5_umi/arm/base_link.STL" />
+    <mesh name="arxr5_link1" file="../models/meshes/L5_umi/arm/Link1.STL" />
+    <mesh name="arxr5_link2" file="../models/meshes/L5_umi/arm/Link2.STL" />
+    <mesh name="arxr5_link3" file="../models/meshes/L5_umi/arm/Link3.STL" />
+    <mesh name="arxr5_link4" file="../models/meshes/L5_umi/arm/Link4.STL" />
+    <mesh name="arxr5_link5" file="../models/meshes/L5_umi/arm/Link5.STL" />
+    <mesh name="arxr5_adapter_flange" file="../models/meshes/DAS_Controller_v3_r5_end_adapter_flange.STL" scale="0.001 0.001 0.001" />
+    <mesh name="umi_link_flange" file="../models/meshes/L5_umi/umi/link_Flange.STL" />
+    <mesh name="umi_base_link" file="../models/meshes/L5_umi/umi/base_link.STL" />
+    <mesh name="umi_link1" file="../models/meshes/L5_umi/umi/link1.STL" />
+    <mesh name="umi_link2" file="../models/meshes/L5_umi/umi/link2.STL" />
+    <mesh name="umi_link3" file="../models/meshes/L5_umi/umi/link3.STL" />
+    <mesh name="umi_link4" file="../models/meshes/L5_umi/umi/link4.STL" />
+    <mesh name="umi_link5" file="../models/meshes/L5_umi/umi/link5.STL" />
+    <mesh name="umi_link6" file="../models/meshes/L5_umi/umi/link6.STL" />
     <mesh name="base_Link" file="base_Link.STL" />
     <mesh name="abad_L_Link" file="abad_L_Link.STL" />
     <mesh name="hip_L_Link" file="hip_L_Link.STL" />
@@ -36,6 +40,10 @@
     <mesh name="hip_R_Link" file="hip_R_Link.STL" />
     <mesh name="knee_R_Link" file="knee_R_Link.STL" />
     <mesh name="ankle_R_Link" file="ankle_R_Link.STL" />
+    <!--
+      miniPC_urdf.STL has 1,313,657 triangles, above MuJoCo's 200,000-triangle
+      STL limit. These eight spatial chunks retain every original triangle.
+    -->
     <mesh name="miniPC_urdf_01" file="mjcf/miniPC_urdf_01.STL" />
     <mesh name="miniPC_urdf_02" file="mjcf/miniPC_urdf_02.STL" />
     <mesh name="miniPC_urdf_03" file="mjcf/miniPC_urdf_03.STL" />
@@ -73,7 +81,7 @@
             <geom name="knee_L_Link_collision_1" class="collision" pos="0.078 0 -0.12" quat="0.962425197628 0 -0.271546936956 0" type="cylinder" size="0.02 0.13" />
             <body name="ankle_L_Link" pos="0.15 0 -0.25981">
               <inertial mass="0.62" pos="0.01074 -0.00061 -0.03314" fullinertia="0.0005255 0.001812 0.0019738 -0.0000035 -0.0000514 0.0000065" />
-              <joint name="ankle_L_Joint" type="hinge" axis="0 -1 0" limited="true" range="-1.1519173 1.5707963" actuatorfrclimited="true" actuatorfrcrange="-20 20" user="15" damping="0" frictionloss="0.01" />
+              <joint name="ankle_L_Joint" type="hinge" axis="0 -1 0" limited="true" range="-1.1519173 1.5707963" actuatorfrclimited="true" actuatorfrcrange="-40 40" user="15" damping="0" frictionloss="0.33" />
               <geom name="ankle_L_Link_visual_1" class="visual" rgba="0.26667059 0.26667059 0.26667059 1.00000000" type="mesh" mesh="ankle_L_Link" />
               <geom name="ankle_L_Link_collision_1" class="collision" type="mesh" mesh="ankle_L_Link" />
             </body>
@@ -97,7 +105,7 @@
             <geom name="knee_R_Link_collision_1" class="collision" pos="0.078 0 -0.12" quat="0.962425197628 0 -0.271546936956 0" type="cylinder" size="0.02 0.13" />
             <body name="ankle_R_Link" pos="0.15 0 -0.25981">
               <inertial mass="0.62" pos="0.01074 0.00061 -0.03314" fullinertia="0.0005255 0.001812 0.0019738 0.0000035 -0.0000514 -0.0000065" />
-              <joint name="ankle_R_Joint" type="hinge" axis="0 -1 0" limited="true" range="-1.1519173 1.5707963" actuatorfrclimited="true" actuatorfrcrange="-20 20" user="15" damping="0" frictionloss="0.01" />
+              <joint name="ankle_R_Joint" type="hinge" axis="0 -1 0" limited="true" range="-1.1519173 1.5707963" actuatorfrclimited="true" actuatorfrcrange="-40 40" user="15" damping="0" frictionloss="0.33" />
               <geom name="ankle_R_Link_visual_1" class="visual" rgba="0.26667059 0.26667059 0.26667059 1.00000000" type="mesh" mesh="ankle_R_Link" />
               <geom name="ankle_R_Link_collision_1" class="collision" type="mesh" mesh="ankle_R_Link" />
             </body>
@@ -122,57 +130,65 @@
         <geom name="tron1computer_collision_1_06" class="collision" type="mesh" mesh="miniPC_urdf_06" />
         <geom name="tron1computer_collision_1_07" class="collision" type="mesh" mesh="miniPC_urdf_07" />
         <geom name="tron1computer_collision_1_08" class="collision" type="mesh" mesh="miniPC_urdf_08" />
-        <body name="base_link_arm" pos="0 0 0.096">
-          <inertial mass="0.42272" pos="-0.00013359 6.672e-05 0.031672" fullinertia="0.00060728 0.00060832 1.917e-4 3.437e-7 9.790e-7 -1.696e-6" />
-          <geom name="base_link_arm_visual_1" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_base_link_arm" rgba="0.89804 0.91765 0.92941 1" />
-          <geom name="base_link_arm_collision_1" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_base_link_arm" />
+        <!-- This subtree is the current assembly.urdf arm chain.  Keep the
+             existing physical arm limits, but use the URDF kinematics,
+             inertias, fixed UMI geometry, and eef_link frame. -->
+        <body name="base_link" pos="0 0 0.096">
+          <inertial mass="0.42272" pos="-0.00013359 0.00006672 0.031672" fullinertia="0.00019 0.00019 0.00020 0 0 0" />
+          <geom name="base_link_visual" class="visual" rgba="0.89804 0.91765 0.92941 1" type="mesh" mesh="arxr5_base_link" />
+          <geom name="base_link_collision" class="collision" type="mesh" mesh="arxr5_base_link" />
           <body name="link1" pos="0 0 0.0565">
-            <inertial mass="0.09728" pos="0.005056 -0.0078534 0.020887" fullinertia="0.00011 0.00005 0.00010 -0.00001 0.00001 -0.00001" />
-            <joint name="J1" type="hinge" axis="0 0 1" limited="true" range="-3.14 2.618" damping="0" frictionloss="0" armature="0" actuatorfrclimited="true" actuatorfrcrange="-100 100" />
-            <geom name="link1_visual_1" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link1" rgba="0.56471 0.56471 0.56471 1" />
-            <geom name="link1_collision_1" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link1" />
+            <inertial mass="0.096804" pos="0.0050395 -0.0077407 0.020897" fullinertia="0.00011 0.00005 0.00010 -0.00001 0.00001 -0.00001" />
+            <joint name="J1" type="hinge" axis="0 0 1" limited="true" range="-3.14 2.618" actuatorfrclimited="true" actuatorfrcrange="-30 30" user="5" />
+            <geom name="link1_visual" class="visual" rgba="0.56471 0.56471 0.56471 1" type="mesh" mesh="arxr5_link1" />
+            <geom name="link1_collision" class="collision" type="mesh" mesh="arxr5_link1" />
             <body name="link2" pos="0.02 0 0.047">
-              <inertial mass="1.1477" pos="-0.12983 -0.00073729 -1.2236e-05" fullinertia="0.00057063 0.03669927 0.03683489 0.00011251 0.00001979 1.203e-8" />
-              <joint name="J2" type="hinge" axis="0 1 0" limited="true" range="-0.05 3.50" damping="0" frictionloss="0" armature="0" actuatorfrclimited="true" actuatorfrcrange="-100 100" />
-              <geom name="link2_visual_1" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link2" rgba="0.69804 0.69804 0.69804 1" />
-              <geom name="link2_collision_1" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link2" />
-              <body name="link3" pos="-0.264 0 0" quat="-3.67320510335e-06 0.999999999993 0 0">
-                <inertial mass="0.66" pos="0.15404 5.5044e-07 -0.054689" fullinertia="0.00178249 0.02486615 0.02329476 -0.00003986 0.00571 1.346e-5" />
-                <joint name="J3" type="hinge" axis="0 1 0" limited="true" range="-0.1 3.2" damping="0" frictionloss="0" armature="0" actuatorfrclimited="true" actuatorfrcrange="-100 100" />
-                <geom name="link3_visual_1" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link3" rgba="0.89804 0.91765 0.92941 1" />
-                <geom name="link3_collision_1" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link3" />
-                <body name="link4" pos="0.245 0 -0.06">
-                  <inertial mass="0.11714" pos="0.040231 0.0039307 -0.035335" fullinertia="0.00017832 0.00021182 0.00011328 0.00001697 0.0000776 -0.00001779" />
-                  <joint name="J4" type="hinge" axis="0 1 0" limited="true" range="-1.6 1.55" damping="0" frictionloss="0" armature="0" actuatorfrclimited="true" actuatorfrcrange="-100 100" />
-                  <geom name="link4_visual_1" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link4" rgba="0.56471 0.56471 0.56471 1" />
-                  <geom name="link4_collision_1" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link4" />
-                  <body name="link5" pos="0.06775 -5e-05 -0.0865">
-                    <inertial mass="0.6353" pos="0.0036004 -1.5445e-05 0.055255" fullinertia="0.00254972 0.00255018 0.00026961 2.600e-7 -0.00021534 -5.980e-7" />
-                    <joint name="J5" type="hinge" axis="0 0 1" limited="true" range="-1.57 1.57" damping="0" frictionloss="0" armature="0" actuatorfrclimited="true" actuatorfrcrange="-100 100" />
-                    <geom name="link5_visual_1" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link5" rgba="0.69804 0.69804 0.69804 1" />
-                    <geom name="link5_collision_1" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_arm_raw_meshes_ARM_link5" />
-                    <body name="link6" pos="0.02895 0 0.0865" quat="-3.67320510335e-06 0.999999999993 0 0">
-                      <inertial mass="0.902" pos="0.050676 -4.9137e-05 5.123e-05" fullinertia="0.00029 0.00028 0.00045 0.00000 0.00000 -0.00001" />
-                      <joint name="J6" type="hinge" axis="1 0 0" limited="true" range="-2 2" damping="0" frictionloss="0" armature="0" actuatorfrclimited="true" actuatorfrcrange="-100 100" />
-                      <geom name="link6_visual_1" class="visual" type="mesh" mesh="urdf_models_meshes_DAS_Controller_v3_r5_end_adapter_flange" rgba="0.89804 0.91765 0.92941 1" pos="0 -0.0225 -0.0225" quat="0.500000013397 0.5 0.499999986603 0.5" />
-                      <geom name="link6_visual_2" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link_Flange" rgba="0.89804 0.91765 0.92941 1" pos="0.0091 0 0" />
-                      <geom name="link6_visual_3" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_base_link" rgba="1 1 1 1" pos="0.0999414 3.88e-05 0.0767217" quat="0.99144482142 0 0.130526495702 0" />
-                      <geom name="link6_visual_4" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link1" rgba="1 1 1 1" pos="0.1066203 0.0429998 0.0136096" />
-                      <geom name="link6_visual_5" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link3" rgba="0.498039 0.498039 0.498039 1" pos="0.1498023 0.0887898 0.0136095" />
-                      <geom name="link6_visual_6" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link2" rgba="0.792157 0.819608 0.933333 1" pos="0.1066203 -0.0430002 0.0136096" />
-                      <geom name="link6_visual_7" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link4" rgba="0.498039 0.498039 0.498039 1" pos="0.1498023 -0.0887902 0.0136095" />
-                      <geom name="link6_visual_8" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link5" rgba="0.796078 0.823529 0.937255 1" pos="0.12187 0.0195168 0.0136097" />
-                      <geom name="link6_visual_9" class="visual" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link6" rgba="0.796078 0.823529 0.937255 1" pos="0.12187 -0.0195172 0.0136097" />
-                      <geom name="link6_collision_1" class="collision" type="mesh" mesh="urdf_models_meshes_DAS_Controller_v3_r5_end_adapter_flange" pos="0 -0.0225 -0.0225" quat="0.500000013397 0.5 0.499999986603 0.5" />
-                      <geom name="link6_collision_2" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link_Flange" pos="0.0091 0 0" />
-                      <geom name="link6_collision_3" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_base_link" pos="0.0999414 3.88e-05 0.0767217" quat="0.99144482142 0 0.130526495702 0" />
-                      <geom name="link6_collision_4" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link1" pos="0.1066203 0.0429998 0.0136096" />
-                      <geom name="link6_collision_5" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link3" pos="0.1498023 0.0887898 0.0136095" />
-                      <geom name="link6_collision_6" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link2" pos="0.1066203 -0.0430002 0.0136096" />
-                      <geom name="link6_collision_7" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link4" pos="0.1498023 -0.0887902 0.0136095" />
-                      <geom name="link6_collision_8" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link5" pos="0.12187 0.0195168 0.0136097" />
-                      <geom name="link6_collision_9" class="collision" type="mesh" mesh="urdf_models_meshes_L5_umi_umi_link6" pos="0.12187 -0.0195172 0.0136097" />
-                      <site name="eef_link" size="0.001" rgba="0 0 0 0" group="0" pos="0.15 0 0" quat="1 0 0 0" />
+              <inertial mass="1.1988" pos="-0.12992 -0.0011822 -0.000026366" fullinertia="0.00065 0.01647 0.01646 0.00008 0 0" />
+              <joint name="J2" type="hinge" axis="0 1 0" limited="true" range="-0.05 3.5" actuatorfrclimited="true" actuatorfrcrange="-40 40" user="5" />
+              <geom name="link2_visual" class="visual" rgba="0.79216 0.81961 0.93333 1" type="mesh" mesh="arxr5_link2" />
+              <geom name="link2_collision" class="collision" type="mesh" mesh="arxr5_link2" />
+              <body name="link3" pos="-0.264 0 0" quat="0.00000367320510335 0.999999999993 0 0">
+                <inertial mass="0.84082" pos="0.16181 0.0011723 -0.05455" fullinertia="0.00082 0.00849 0.00834 0.00008 -0.00074 0.00001" />
+                <joint name="J3" type="hinge" axis="0 1 0" limited="true" range="-0.1 3.2" actuatorfrclimited="true" actuatorfrcrange="-30 30" user="5.5" />
+                <geom name="link3_visual" class="visual" rgba="0.89804 0.91765 0.92941 1" type="mesh" mesh="arxr5_link3" />
+                <geom name="link3_collision" class="collision" type="mesh" mesh="arxr5_link3" />
+                <body name="link4" pos="0.245 -0.00005 -0.06">
+                  <inertial mass="0.12432" pos="0.041751 0.0054236 -0.03337" fullinertia="0.00022 0.00025 0.00017 -0.00002 -0.00009 0.00002" />
+                  <joint name="J4" type="hinge" axis="0 1 0" limited="true" range="-1.6 1.55" actuatorfrclimited="true" actuatorfrcrange="-15 15" user="5.5" />
+                  <geom name="link4_visual" class="visual" rgba="0.79216 0.81961 0.93333 1" type="mesh" mesh="arxr5_link4" />
+                  <geom name="link4_collision" class="collision" type="mesh" mesh="arxr5_link4" />
+                  <body name="link5" pos="0.073914 0.00005 -0.083391">
+                    <inertial mass="0.63601" pos="-0.000083435 -0.000015428 0.052216" fullinertia="0.00084 0.00082 0.00026 0 0.00007 0" />
+                    <joint name="J5" type="hinge" axis="0 0 1" limited="true" range="-1.57 1.57" actuatorfrclimited="true" actuatorfrcrange="-10 10" user="5" />
+                    <geom name="link5_visual" class="visual" rgba="0.69804 0.69804 0.69804 1" type="mesh" mesh="arxr5_link5" />
+                    <geom name="link5_collision" class="collision" type="mesh" mesh="arxr5_link5" />
+                    <body name="link6" pos="0.025286 0 0.083391" quat="-0.00000367320510335 0.999999999993 0 0">
+                      <inertial mass="0.775" pos="0.054676 -0.000049137 0.00005123" fullinertia="0.00024917 0.00024058 0.00038664 0 0 -0.00000859" />
+                      <joint name="J6" type="hinge" axis="1 0 0" limited="true" range="-2 2" actuatorfrclimited="true" actuatorfrcrange="-10 10" user="5" />
+                      <geom name="link6_adapter_visual" class="visual" pos="0.004 -0.0225 -0.0225" quat="0.5 0.5 0.5 0.5" rgba="0.62 0.62 0.62 1" type="mesh" mesh="arxr5_adapter_flange" />
+                      <geom name="link6_adapter_collision" class="collision" pos="0.004 -0.0225 -0.0225" quat="0.5 0.5 0.5 0.5" type="mesh" mesh="arxr5_adapter_flange" />
+                      <geom name="link6_flange_visual" class="visual" pos="0.0131 0 0" rgba="0.89804 0.91765 0.92941 1" type="mesh" mesh="umi_link_flange" />
+                      <geom name="link6_flange_collision" class="collision" pos="0.0131 0 0" type="mesh" mesh="umi_link_flange" />
+                      <geom name="umi_base_visual" class="visual" pos="0.1039414 0.0000388 0.0767217" quat="0.99144482142 0 0.130526495702 0" rgba="1 1 1 1" type="mesh" mesh="umi_base_link" />
+                      <geom name="umi_base_collision" class="collision" pos="0.1039414 0.0000388 0.0767217" quat="0.99144482142 0 0.130526495702 0" type="mesh" mesh="umi_base_link" />
+                      <geom name="umi_link1_visual" class="visual" pos="0.1106203 0.0429998 0.0136096" rgba="1 1 1 1" type="mesh" mesh="umi_link1" />
+                      <geom name="umi_link1_collision" class="collision" pos="0.1106203 0.0429998 0.0136096" type="mesh" mesh="umi_link1" />
+                      <geom name="umi_link3_visual" class="visual" pos="0.1538023 0.0887898 0.0136095" rgba="0.498039 0.498039 0.498039 1" type="mesh" mesh="umi_link3" />
+                      <geom name="umi_link3_collision" class="collision" pos="0.1538023 0.0887898 0.0136095" type="mesh" mesh="umi_link3" />
+                      <geom name="umi_link2_visual" class="visual" pos="0.1106203 -0.0430002 0.0136096" rgba="0.792157 0.819608 0.933333 1" type="mesh" mesh="umi_link2" />
+                      <geom name="umi_link2_collision" class="collision" pos="0.1106203 -0.0430002 0.0136096" type="mesh" mesh="umi_link2" />
+                      <geom name="umi_link4_visual" class="visual" pos="0.1538023 -0.0887902 0.0136095" rgba="0.498039 0.498039 0.498039 1" type="mesh" mesh="umi_link4" />
+                      <geom name="umi_link4_collision" class="collision" pos="0.1538023 -0.0887902 0.0136095" type="mesh" mesh="umi_link4" />
+                      <geom name="umi_link5_visual" class="visual" pos="0.1258700 0.0195168 0.0136097" rgba="0.796078 0.823529 0.937255 1" type="mesh" mesh="umi_link5" />
+                      <geom name="umi_link5_collision" class="collision" pos="0.1258700 0.0195168 0.0136097" type="mesh" mesh="umi_link5" />
+                      <geom name="umi_link6_visual" class="visual" pos="0.1258700 -0.0195172 0.0136097" rgba="0.796078 0.823529 0.937255 1" type="mesh" mesh="umi_link6" />
+                      <geom name="umi_link6_collision" class="collision" pos="0.1258700 -0.0195172 0.0136097" type="mesh" mesh="umi_link6" />
+                      <!-- Track the EEF 0.15 m forward along the link6/J6 +X axis. -->
+                      <body name="eef_link" pos="0.15 0 0" quat="1 0 0 0">
+                        <site name="eef" type="sphere" size="0.004" rgba="1 0.2 0.1 0.8" />
+                      </body>
+                      <!-- DAS_Controller_V3_with_flange/base_link tracking frame. -->
+                      <body name="das_base_link" pos="0.1039414 0.0000388 0.0767217" quat="0.99144482142 0 0.130526495702 0" />
                     </body>
                   </body>
                 </body>
@@ -184,20 +200,20 @@
     </body>
   </worldbody>
   <actuator>
-    <motor name="J1_motor" joint="J1" gear="1" ctrllimited="true" ctrlrange="-100 100" />
-    <motor name="J2_motor" joint="J2" gear="1" ctrllimited="true" ctrlrange="-100 100" />
-    <motor name="J3_motor" joint="J3" gear="1" ctrllimited="true" ctrlrange="-100 100" />
-    <motor name="J4_motor" joint="J4" gear="1" ctrllimited="true" ctrlrange="-100 100" />
-    <motor name="J5_motor" joint="J5" gear="1" ctrllimited="true" ctrlrange="-100 100" />
-    <motor name="J6_motor" joint="J6" gear="1" ctrllimited="true" ctrlrange="-100 100" />
+    <motor name="J1_motor" joint="J1" gear="1" ctrllimited="true" ctrlrange="-30 30" />
+    <motor name="J2_motor" joint="J2" gear="1" ctrllimited="true" ctrlrange="-40 40" />
+    <motor name="J3_motor" joint="J3" gear="1" ctrllimited="true" ctrlrange="-30 30" />
+    <motor name="J4_motor" joint="J4" gear="1" ctrllimited="true" ctrlrange="-15 15" />
+    <motor name="J5_motor" joint="J5" gear="1" ctrllimited="true" ctrlrange="-10 10" />
+    <motor name="J6_motor" joint="J6" gear="1" ctrllimited="true" ctrlrange="-10 10" />
     <motor name="abad_L_Joint_motor" joint="abad_L_Joint" gear="1" ctrllimited="true" ctrlrange="-80 80" />
     <motor name="hip_L_Joint_motor" joint="hip_L_Joint" gear="1" ctrllimited="true" ctrlrange="-80 80" />
     <motor name="knee_L_Joint_motor" joint="knee_L_Joint" gear="1" ctrllimited="true" ctrlrange="-80 80" />
-    <motor name="ankle_L_Joint_motor" joint="ankle_L_Joint" gear="1" ctrllimited="true" ctrlrange="-20 20" />
+    <motor name="ankle_L_Joint_motor" joint="ankle_L_Joint" gear="1" ctrllimited="true" ctrlrange="-40 40" />
     <motor name="abad_R_Joint_motor" joint="abad_R_Joint" gear="1" ctrllimited="true" ctrlrange="-80 80" />
     <motor name="hip_R_Joint_motor" joint="hip_R_Joint" gear="1" ctrllimited="true" ctrlrange="-80 80" />
     <motor name="knee_R_Joint_motor" joint="knee_R_Joint" gear="1" ctrllimited="true" ctrlrange="-80 80" />
-    <motor name="ankle_R_Joint_motor" joint="ankle_R_Joint" gear="1" ctrllimited="true" ctrlrange="-20 20" />
+    <motor name="ankle_R_Joint_motor" joint="ankle_R_Joint" gear="1" ctrllimited="true" ctrlrange="-40 40" />
   </actuator>
   <sensor>
     <framequat name="imu_quat" objtype="site" objname="imu" />
