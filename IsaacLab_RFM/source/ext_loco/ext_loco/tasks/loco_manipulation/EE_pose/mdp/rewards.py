@@ -47,6 +47,7 @@ def safety_reward_exp(
     std: float,
     base_height_target: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    use_gates: bool = True,
 ) -> torch.Tensor:
     """计算“安全性”奖励（指数核）。
 
@@ -182,6 +183,8 @@ def safety_reward_exp(
     env._loco_safety_scale = loco_safety_scale + 0.4
 
     # 按 _loco_mani_scale 混合manipulation安全和locomotion安全。
+    if not use_gates:
+        return 0.5 * (mani_safety_scale + loco_safety_scale)
     return mani_safety_scale * (1 - env._loco_mani_scale) + loco_safety_scale * env._loco_mani_scale
 
 
@@ -331,6 +334,7 @@ def track_EE_position_exp(
     std: float,
     init_value: float = 0.99,
     command_name: str = "EE_pose",
+    use_gates: bool = True,
 ) -> torch.Tensor:
     """EE 位置跟踪奖励（指数核）。
 
@@ -358,7 +362,10 @@ def track_EE_position_exp(
     micro_enhancement = torch.exp(-5 * EE_position_error / std**2)
 
     # 只在操作阶段（1 - _loco_mani_scale）有效，并乘操作安全尺度。
-    return (normal + micro_enhancement) * (1 - env._loco_mani_scale) * env._mani_safety_scale
+    reward = normal + micro_enhancement
+    if not use_gates:
+        return reward
+    return reward * (1 - env._loco_mani_scale) * env._mani_safety_scale
 
 
 def track_EE_orientation_exp(
@@ -428,6 +435,7 @@ def track_EE_orientation_fine_exp(
     env: ManagerBasedRLEnv,
     std: float = 0.25,
     command_name: str = "EE_pose",
+    use_gates: bool = True,
 ) -> torch.Tensor:
     """Narrow-kernel EE orientation reward for near-target refinement.
 
@@ -442,6 +450,8 @@ def track_EE_orientation_fine_exp(
 
     fine = torch.exp(-torch.square(EE_orientation_error / std))
     position_scale = torch.exp(-EE_position_error / 0.5)
+    if not use_gates:
+        return fine
     return fine * position_scale * (1 - env._loco_mani_scale) * env._mani_safety_scale
 
 
@@ -541,6 +551,11 @@ def track_EE_pb(
     # 远距离时保留完整的进度奖励；近目标时衰减到 25%，避免策略为了立即
     # 减小 EE 误差而忽略底盘姿态、用快速小碎步抢进度。精定位仍由
     # track_EE_position_exp / track_EE_orientation_exp 负责。
+    progress_reward = 2 * pos_improve * position_scale + orient_improve * orient_scale
+    if use_safety_gate:
+        progress_reward = progress_reward * env._loco_safety_scale
+    if not use_walking_gate:
+        return progress_reward
     near_target_progress_scale = 0.25 + 0.75 * _walking_gate(
         env, command_name=command_name
     )
@@ -600,6 +615,48 @@ def base_target_heading_alignment(
     return torch.where(target_distance_xy >= min_target_distance, alignment, torch.ones_like(alignment))
 
 
+def target_directed_base_velocity_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str = "EE_pose",
+    max_speed: float = 0.35,
+    slowdown_distance: float = 1.0,
+    standoff_distance: float = 0.45,
+    std: float = 0.25,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward a slow, distance-aware base velocity toward the EE target.
+
+    The desired speed decreases linearly inside ``slowdown_distance`` and reaches
+    zero at ``standoff_distance``.  This gives locomotion an explicit base-level
+    objective instead of asking EE progress alone to pull the whole robot forward.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    command_term = env.command_manager.get_term(command_name)
+
+    target_delta_xy = command_term.pose_command_w[:, :2] - asset.data.root_link_pos_w[:, :2]
+    target_distance_xy = torch.linalg.vector_norm(target_delta_xy, dim=1)
+    target_direction_xy = target_delta_xy / target_distance_xy.unsqueeze(1).clamp_min(1.0e-6)
+
+    travel_distance = torch.clamp(target_distance_xy - standoff_distance, min=0.0)
+    desired_speed = max_speed * torch.clamp(travel_distance / slowdown_distance, max=1.0)
+    desired_velocity_xy = target_direction_xy * desired_speed.unsqueeze(1)
+    velocity_error_sq = torch.sum(
+        torch.square(asset.data.root_link_lin_vel_w[:, :2] - desired_velocity_xy), dim=1
+    )
+    return torch.exp(-velocity_error_sq / (std**2))
+
+
+def walking_arm_deviation_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    command_name: str = "EE_pose",
+) -> torch.Tensor:
+    """Keep the arm near its default pose only while the target still requires walking."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    deviation = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    return torch.mean(torch.square(deviation), dim=1) * _walking_gate(env, command_name=command_name)
+
+
 def base_pitch_exp(
     env: ManagerBasedRLEnv,
     scale: float,
@@ -646,6 +703,7 @@ def foot_flat_l2(
     asset_cfg: SceneEntityCfg,
     threshold: float = 5.0,
     command_name: str = "EE_pose",
+    use_standing_gate: bool = True,
 ) -> torch.Tensor:
     """近目标接触脚平整惩罚，抑制脚尖/脚跟承重。
 
@@ -686,6 +744,7 @@ def foot_flat_l2(
     per_foot_flatness_error = torch.sum(torch.square(foot_z_w[..., :2]), dim=-1)
     contact_mask = torch.norm(current_forces, dim=-1) > threshold
     standing_gate = _standing_gate(env, command_name=command_name)
+    reward_gate = standing_gate if use_standing_gate else torch.ones_like(standing_gate)
 
     # 供 commands.py 在 episode reset 时做精确的加权聚合。显式 detach，避免
     # 诊断缓存持有无用的计算图；reward 本身仍使用上面的原始张量。
@@ -698,7 +757,7 @@ def foot_flat_l2(
 
     return (
         torch.sum(per_foot_flatness_error * contact_mask.float(), dim=1)
-        * standing_gate
+        * reward_gate
     )
 
 
@@ -1067,6 +1126,8 @@ def feet_contacts_reg(
     threshold: float,
     sensor_cfg: SceneEntityCfg,
     stable_time: float = 0.2,
+    use_standing_gate: bool = True,
+    use_position_gate: bool = True,
 ) -> torch.Tensor:
     """近目标双脚稳定接触奖励。
 
@@ -1089,14 +1150,15 @@ def feet_contacts_reg(
     # 位置误差用于附加缩放（位置偏差大时降低该奖励影响）。
     EE_position_error = env.command_manager.get_term("EE_pose").metrics["position_error"]
 
-    position_scale = torch.exp(-EE_position_error / 0.5)
+    position_scale = torch.exp(-EE_position_error / 0.5) if use_position_gate else torch.ones_like(EE_position_error)
 
     # sigmoid_scale = generate_sigmoid_scale(
     #     mu=0.8, decay_length=0.8, x=env.command_manager.get_term("EE_pose").se3_distance_ref
     # )
 
     # 近目标时鼓励双脚连续接触；使用实时位置误差，不受计时式 loco/mani scale 影响。
-    return reward_mani * _standing_gate(env) * position_scale
+    standing_scale = _standing_gate(env) if use_standing_gate else torch.ones_like(reward_mani)
+    return reward_mani * standing_scale * position_scale
 
 
 def fly_penalty(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:

@@ -25,7 +25,9 @@ class _OnnxGRUExporter(torch.nn.Module):
         self.verbose = verbose
         self.gru = copy.deepcopy(gru_wrapper)
         self.gru_latent_dim = gru_wrapper.gru_latent_dim
-        self.input_dim = gru_wrapper.gru.input_size
+        self.input_dim = getattr(gru_wrapper, "input_dim", None)
+        if self.input_dim is None:
+            self.input_dim = gru_wrapper.gru.input_size
 
     def forward(self, obs, hidden_state):
         # Export through a pure forward path to avoid mutating module attributes.

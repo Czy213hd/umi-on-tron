@@ -81,6 +81,7 @@ class SimplifiedContactNetModel(nn.Module):
         next_obs_decoder_hidden_dims=[256, 256],
         next_obs_decoder_activation="elu",
         dropout=0.1,
+        **_,
     ):
         super(SimplifiedContactNetModel, self).__init__()
         self.model_dim = model_dim

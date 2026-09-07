@@ -436,7 +436,7 @@ class RewardsCfg:
 
     # Safety
     safety_exp = RewTerm(
-        func=mdp.safety_reward_exp, weight=2.0, params={"base_height_target": 0.8, "std": math.sqrt(0.5)}
+        func=mdp.safety_reward_exp, weight=2.0, params={"base_height_target": 0.8, "std": math.sqrt(0.5), "use_gates": True}
     )
     # pose_product = RewTerm(
     #     func=mdp.pose_product_reward,
@@ -444,7 +444,7 @@ class RewardsCfg:
     #     params={"pos_sigma": 0.6, "orn_sigma": 2.0, "command_name": "EE_pose"},
     # )
     # EE Tracking
-    track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=6.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})            #2.0 by Edwin
+    track_EE_position_exp = RewTerm(func=mdp.track_EE_position_exp, weight=6.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5), "use_gates": True})            #2.0 by Edwin
     # track_EE_orientation_exp = RewTerm(func=mdp.track_EE_orientation_exp, weight=6.0, params={"command_name": "EE_pose", "std": math.sqrt(0.5)})      #3.0 by Edwin
     track_EE_orientation_coarse_exp = RewTerm(
         func=mdp.track_EE_orientation_coarse_exp,
@@ -454,13 +454,34 @@ class RewardsCfg:
     track_EE_orientation_fine_exp = RewTerm(
         func=mdp.track_EE_orientation_fine_exp,
         weight=6.0,
-        params={"command_name": "EE_pose", "std": 0.25},
+        params={"command_name": "EE_pose", "std": 0.25, "use_gates": True},
     )
-    track_EE_pb = RewTerm(func=mdp.track_EE_pb, weight=15.0)
+    track_EE_pb = RewTerm(func=mdp.track_EE_pb, weight=15.0, params={"use_walking_gate": True, "use_safety_gate": True})
     base_target_heading_alignment = RewTerm(
         func=mdp.base_target_heading_alignment,
         weight=0.5,
         params={"command_name": "EE_pose", "min_target_distance": 0.1},
+    )
+    # Optional locomotion shaping terms.  Their default zero weights preserve the
+    # baseline; stable-navigation runs enable them through Hydra overrides.
+    target_directed_base_velocity_exp = RewTerm(
+        func=mdp.target_directed_base_velocity_exp,
+        weight=0.0,
+        params={
+            "command_name": "EE_pose",
+            "max_speed": 0.35,
+            "slowdown_distance": 1.0,
+            "standoff_distance": 0.45,
+            "std": 0.25,
+        },
+    )
+    walking_arm_deviation_l2 = RewTerm(
+        func=mdp.walking_arm_deviation_l2,
+        weight=0.0,
+        params={
+            "command_name": "EE_pose",
+            "asset_cfg": SceneEntityCfg("robot", joint_names="J.*"),
+        },
     )
     # track_EE_reference_exp = RewTerm(func=mdp.track_EE_reference_exp, weight=2.0, params={"std": math.sqrt(0.5), "init_value": 0.98})#5
 
@@ -562,7 +583,7 @@ class RewardsCfg:
     feet_contacts_reg = RewTerm(
         func=mdp.feet_contacts_reg,
         weight=0.5,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"), "threshold": 5.0},
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"), "threshold": 5.0, "use_standing_gate": True, "use_position_gate": True},
     )
     knee_contacts = RewTerm(
         func=mdp.undesired_contacts,
@@ -598,6 +619,7 @@ class RewardsCfg:
             ),
             "threshold": 5.0,
             "command_name": "EE_pose",
+            "use_standing_gate": True,
         },
     )
     foot_slip_l2 = RewTerm(
