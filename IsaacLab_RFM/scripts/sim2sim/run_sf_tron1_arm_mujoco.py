@@ -3,8 +3,8 @@
 
 The inference chain matches the IsaacLab/RSL-RL export:
 
-    10 x 55 contact observations -> contactNet -> GRU -> 67-D latent
-    65-D policy observation + 67-D latent -> actor -> 14 joint targets
+    10 x 57 contact observations -> contactNet -> GRU -> 67-D latent
+    67-D policy observation + 67-D latent -> actor -> 14 joint targets
 
 If ``--command`` is omitted, the program asks for a final end-effector pose
 as ``x y z roll pitch yaw`` before opening the viewer.
@@ -82,6 +82,7 @@ LEG_NAMES = (
 ARM_NAMES = ("J1", "J2", "J3", "J4", "J5", "J6")
 LEG_IDS = np.array([JOINT_NAMES.index(name) for name in LEG_NAMES], dtype=int)
 ARM_IDS = np.array([JOINT_NAMES.index(name) for name in ARM_NAMES], dtype=int)
+J6_ID = JOINT_NAMES.index("J6")
 # JointPositionAction scales saved in this checkpoint's params/env.yaml:
 # legs/ankles=0.6, J1-J3=0.3, J4-J6=0.2.
 ACTION_SCALE = np.array(
@@ -124,11 +125,11 @@ TRAINING_PHYSICS_DT = 0.005
 DEFAULT_PHYSICS_DT = 0.001
 POLICY_DT = 0.02
 HISTORY_LENGTH = 10
-OBS_DIM = 65
-CONTACT_OBS_DIM = 55
+OBS_DIM = 67
+CONTACT_OBS_DIM = 57
 ACTION_DIM = 14
 # A single MuJoCo sliding coefficient cannot represent PhysX's independent
-# static [0.6, 1.0] and dynamic [0.4, 0.9] randomization. 0.9 lies in both
+# static [0.7, 1.3] and dynamic [0.6, 1.2] randomization. 0.9 lies in both
 # training ranges and is therefore the deterministic parity value.
 MUJOCO_CONTACT_FRICTION = "0.9 0.005 0.0001"
 
@@ -183,6 +184,15 @@ def parse_args() -> argparse.Namespace:
         "Default: the 10 s training episode manually, or one complete trajectory.",
     )
     parser.add_argument(
+        "--freeze-after",
+        type=float,
+        default=None,
+        help=(
+            "Stop advancing physics after this many simulation seconds while keeping "
+            "the viewer open on the final pose. Use --duration 0 for an indefinite hold."
+        ),
+    )
+    parser.add_argument(
         "--base-height",
         type=float,
         default=0.8,
@@ -201,6 +211,15 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="SE(3) reference decay rate. Training samples [0.5, 1.4] per command; "
         "1.0 is the deterministic training-domain value, while 0 matches fixed Command-Play.",
+    )
+    parser.add_argument(
+        "--action-scale",
+        type=float,
+        default=None,
+        help=(
+            "Override the JointPositionAction scale uniformly for all 14 joints. "
+            "Use 1.0 for legacy deploy2; omit for the newer grouped scales."
+        ),
     )
     latent_group = parser.add_mutually_exclusive_group()
     latent_group.add_argument(
@@ -231,6 +250,29 @@ def parse_args() -> argparse.Namespace:
         help="Use a stationary free camera instead of following base_Link.",
     )
     parser.add_argument(
+        "--camera-azimuth",
+        type=float,
+        default=135.0,
+        help="Initial MuJoCo camera azimuth in degrees (150 is the robot's 1 o'clock direction).",
+    )
+    parser.add_argument(
+        "--camera-elevation",
+        type=float,
+        default=-18.0,
+        help="Initial MuJoCo camera elevation in degrees (default: -18).",
+    )
+    parser.add_argument(
+        "--camera-distance",
+        type=float,
+        default=2.4,
+        help="Initial MuJoCo camera distance in metres (default: 2.4).",
+    )
+    parser.add_argument(
+        "--hide-current-ee-frame",
+        action="store_true",
+        help="Hide the current link6 RGB frame and the built-in red EEF marker.",
+    )
+    parser.add_argument(
         "--door",
         action="store_true",
         help="Add the deployment door scene. Disabled by default to match the flat training scene.",
@@ -250,6 +292,23 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=math.radians(5.0),
         help="Target roll/pitch/yaw increment per key press in radians (default: 5 degrees).",
+    )
+    parser.add_argument(
+        "--record-output",
+        type=Path,
+        help=(
+            "Record keyboard teleoperation at the 50 Hz policy rate to an NPZ file. "
+            "Raw and smoothed replayable PKL trajectories are written beside it."
+        ),
+    )
+    parser.add_argument(
+        "--record-smoothing",
+        type=float,
+        default=0.12,
+        help=(
+            "Gaussian smoothing sigma in seconds for the exported keyboard trajectory "
+            "(default: 0.12; 0 disables smoothing)."
+        ),
     )
     parser.add_argument(
         "--trajectory",
@@ -284,6 +343,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable the XY centering used by IsaacLab PicklePoseSequenceCommand.",
     )
+    parser.add_argument(
+        "--pickup-object",
+        action="store_true",
+        help=(
+            "Show the trajectory metadata object_position_world as a visual pickup object; "
+            "after payload_mass becomes positive it follows the measured gripper point."
+        ),
+    )
+    parser.add_argument(
+        "--payload-gravity",
+        action="store_true",
+        help=(
+            "Apply each trajectory frame's payload_mass as downward gravity at the gripper point."
+        ),
+    )
     parser.add_argument("--log-interval", type=float, default=1.0)
     parser.add_argument(
         "--leg-debug",
@@ -301,6 +375,17 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Maximum leg target-position change per 50 Hz policy update in radians; 0 disables it.",
+    )
+    parser.add_argument(
+        "--lock-j6",
+        action="store_true",
+        help="Force J6 to remain at --lock-j6-angle and expose the locked command as last_action.",
+    )
+    parser.add_argument(
+        "--lock-j6-angle",
+        type=float,
+        default=0.0,
+        help="Fixed J6 position in radians when --lock-j6 is enabled (default: 0).",
     )
     return parser.parse_args()
 
@@ -375,6 +460,44 @@ def rotation_angle(rotation: np.ndarray) -> float:
     return float(math.acos(float(cosine)))
 
 
+def axis_angle_from_rotation(rotation: np.ndarray) -> np.ndarray:
+    """Convert a rotation matrix to an axis-angle vector."""
+    cosine = float(np.clip((np.trace(rotation) - 1.0) * 0.5, -1.0, 1.0))
+    angle = math.acos(cosine)
+    if angle < 1.0e-9:
+        return np.zeros(3, dtype=np.float64)
+    if math.pi - angle < 1.0e-5:
+        eigenvalues, eigenvectors = np.linalg.eig(rotation)
+        axis = np.real(eigenvectors[:, np.argmin(np.abs(eigenvalues - 1.0))])
+        axis /= np.linalg.norm(axis)
+        return axis * angle
+    axis = np.array(
+        [
+            rotation[2, 1] - rotation[1, 2],
+            rotation[0, 2] - rotation[2, 0],
+            rotation[1, 0] - rotation[0, 1],
+        ],
+        dtype=np.float64,
+    ) / (2.0 * math.sin(angle))
+    return axis * angle
+
+
+def gaussian_smooth(values: np.ndarray, sigma_seconds: float, sample_dt: float) -> np.ndarray:
+    """Smooth a sampled vector signal with an edge-preserving Gaussian kernel."""
+    values = np.asarray(values, dtype=np.float64)
+    if sigma_seconds <= 0.0 or len(values) < 2:
+        return values.copy()
+    sigma_samples = sigma_seconds / sample_dt
+    radius = max(1, int(math.ceil(3.0 * sigma_samples)))
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * np.square(offsets / sigma_samples))
+    kernel /= kernel.sum()
+    padded = np.pad(values, ((radius, radius), (0, 0)), mode="edge")
+    return np.column_stack(
+        [np.convolve(padded[:, index], kernel, mode="valid") for index in range(values.shape[1])]
+    )
+
+
 def rotation_from_axis_angle(axis_angle: np.ndarray) -> np.ndarray:
     axis_angle = np.asarray(axis_angle, dtype=np.float64)
     angle = float(np.linalg.norm(axis_angle))
@@ -420,6 +543,20 @@ class PickleTrajectory:
         self.path = path
         self.episode_index = episode_index % len(episodes)
         episode = episodes[self.episode_index]
+        metadata = episode.get("metadata", {})
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            raise ValueError("Trajectory metadata must be a dictionary when provided")
+        self.metadata = metadata
+        self.position_mode = metadata.get("position_mode", "relative_to_playback_start")
+        if self.position_mode not in (
+            "relative_to_playback_start",
+            "relative_xy_absolute_world_z",
+            "absolute_world",
+            "absolute_base",
+        ):
+            raise ValueError(f"Unsupported trajectory position_mode: {self.position_mode}")
         self.positions = np.asarray(episode["ee_pos"], dtype=np.float64).copy()
         axis_angles = np.asarray(episode["ee_axis_angle"], dtype=np.float64)
         if self.positions.ndim != 2 or self.positions.shape[1] != 3:
@@ -428,12 +565,31 @@ class PickleTrajectory:
             raise ValueError(
                 f"ee_axis_angle shape {axis_angles.shape} does not match ee_pos {self.positions.shape}"
             )
-        if planar_center:
+        if planar_center and self.position_mode not in ("absolute_world", "absolute_base"):
             if len(self.positions) < 4:
                 raise ValueError("planar_center requires at least four trajectory frames")
             self.positions[:, :2] -= self.positions[1:4, :2].mean(axis=0)
 
         self.rotations = np.stack([rotation_from_axis_angle(value) for value in axis_angles])
+        self.payload_mass = np.asarray(
+            episode.get("payload_mass", np.zeros(len(self.positions))), dtype=np.float64
+        )
+        if self.payload_mass.shape != (len(self.positions),):
+            raise ValueError("trajectory payload_mass must have one value per pose frame")
+        if not np.isfinite(self.payload_mass).all() or np.any(self.payload_mass < 0.0):
+            raise ValueError("trajectory payload_mass must contain finite non-negative values")
+        self.object_position_world = np.asarray(
+            metadata.get("object_position_world", [0.64, 0.0, 0.06]), dtype=np.float64
+        )
+        self.pickup_tip_offset = np.asarray(
+            metadata.get("pickup_tip_offset_link6", [0.15, 0.0, 0.0]),
+            dtype=np.float64,
+        )
+        self.grasp_time = float(metadata.get("grasp_time_s", math.inf))
+        if self.object_position_world.shape != (3,) or self.pickup_tip_offset.shape != (3,):
+            raise ValueError("pickup object position and tip offset metadata must be 3-vectors")
+        if math.isnan(self.grasp_time) or self.grasp_time < 0.0:
+            raise ValueError("trajectory grasp_time_s must be non-negative")
         time_samples = np.asarray(episode.get("t", []), dtype=np.float64)
         if len(time_samples) >= 2:
             self.sample_dt = float(np.median(np.diff(time_samples)))
@@ -456,6 +612,7 @@ class PickleTrajectory:
         self.command_origin: np.ndarray | None = None
         self.current_cycle = -1
         self.finished_message_printed = False
+        self.current_frame = 0
 
     def translate_offset(self, delta: np.ndarray) -> None:
         self.world_offset += np.asarray(delta, dtype=np.float64)
@@ -487,12 +644,25 @@ class PickleTrajectory:
             self.source_duration - self.sample_dt,
         )
         frame = min(int(source_time / self.sample_dt), len(self.positions) - 1)
+        self.current_frame = frame
         tip_position = self.positions[frame]
         tip_rotation = self.rotations[frame]
         link_position = tip_position + tip_rotation @ self.tip_position_inverse
         link_rotation = tip_rotation @ self.tip_rotation_inverse
-        world_position = self.command_origin + link_position + self.world_offset
-        simulation.set_target(world_position, link_rotation, reset_reference=new_cycle)
+        if self.position_mode == "absolute_base":
+            simulation.command_frame = "base"
+            target_position = link_position + self.world_offset
+        elif self.position_mode == "absolute_world":
+            simulation.command_frame = "world"
+            target_position = link_position + self.world_offset
+        else:
+            simulation.command_frame = "world"
+            target_position = self.command_origin + link_position + self.world_offset
+        if self.position_mode == "relative_xy_absolute_world_z":
+            # Preserve the normal relative anchoring in the horizontal plane,
+            # but interpret the PKL Z value as an exact world-frame height.
+            target_position[2] = link_position[2] + self.world_offset[2]
+        simulation.set_target(target_position, link_rotation, reset_reference=new_cycle)
 
         if not self.loop and elapsed >= self.duration and not self.finished_message_printed:
             print("[trajectory] playback complete; holding the final pose.")
@@ -504,6 +674,8 @@ def load_sim_model(
     *,
     physics_dt: float = DEFAULT_PHYSICS_DT,
     add_door: bool = False,
+    hide_current_ee_frame: bool = False,
+    add_pickup_object: bool = False,
 ) -> mujoco.MjModel:
     """Add a floor and target marker without changing the robot MJCF on disk."""
     mjcf_path = mjcf_path.expanduser().resolve()
@@ -541,16 +713,20 @@ def load_sim_model(
     visual = root.find("visual")
     if visual is None:
         visual = ET.SubElement(root, "visual")
-    if visual.find("headlight") is None:
-        ET.SubElement(
-            visual,
-            "headlight",
-            {"diffuse": "0.7 0.7 0.7", "ambient": "0.25 0.25 0.25", "specular": "0.2 0.2 0.2"},
-        )
+    headlight = visual.find("headlight")
+    if headlight is None:
+        headlight = ET.SubElement(visual, "headlight")
+    headlight.attrib.update(
+        {
+            "diffuse": "0.34 0.35 0.37",
+            "ambient": "0.10 0.11 0.12",
+            "specular": "0.035 0.035 0.035",
+        }
+    )
 
-    # Procedural blue checkerboard matching the familiar MuJoCo grid floor.
-    # It lives only in the in-memory model, so the source robot MJCF remains
-    # reusable by deployments that do not want this viewer styling.
+    # Procedural studio sky and checkerboard floor. They live only in the
+    # in-memory model, so the source robot MJCF remains reusable by deployments
+    # that do not want this viewer styling.
     asset = root.find("asset")
     if asset is None:
         asset = ET.Element("asset")
@@ -563,13 +739,26 @@ def load_sim_model(
         asset,
         "texture",
         {
+            "name": "sim2sim_studio_skybox",
+            "type": "skybox",
+            "builtin": "gradient",
+            "rgb1": "0.48 0.60 0.72",
+            "rgb2": "0.92 0.94 0.96",
+            "width": "512",
+            "height": "3072",
+        },
+    )
+    ET.SubElement(
+        asset,
+        "texture",
+        {
             "name": "sim2sim_checker_texture",
             "type": "2d",
             "builtin": "checker",
             "mark": "edge",
-            "rgb1": "0.12 0.25 0.38",
-            "rgb2": "0.24 0.42 0.58",
-            "markrgb": "0.55 0.68 0.78",
+            "rgb1": "0.26 0.31 0.37",
+            "rgb2": "0.42 0.48 0.55",
+            "markrgb": "0.58 0.64 0.70",
             "width": "512",
             "height": "512",
         },
@@ -580,9 +769,9 @@ def load_sim_model(
         {
             "name": "sim2sim_checker_material",
             "texture": "sim2sim_checker_texture",
-            "texrepeat": "5 5",
+            "texrepeat": "8 8",
             "texuniform": "true",
-            "reflectance": "0.15",
+            "reflectance": "0.08",
         },
     )
 
@@ -609,7 +798,32 @@ def load_sim_model(
         1,
         ET.Element(
             "light",
-            {"name": "sim2sim_light", "pos": "0 -1 3", "dir": "0 0 -1", "directional": "true"},
+            {
+                "name": "sim2sim_key_light",
+                "pos": "-2 -2 4",
+                "dir": "0.4 0.3 -1",
+                "directional": "true",
+                "diffuse": "0.38 0.40 0.44",
+                "ambient": "0.025 0.028 0.032",
+                "specular": "0.07 0.07 0.07",
+                "castshadow": "true",
+            },
+        ),
+    )
+    worldbody.insert(
+        2,
+        ET.Element(
+            "light",
+            {
+                "name": "sim2sim_fill_light",
+                "pos": "2 2 3",
+                "dir": "-0.5 -0.3 -1",
+                "directional": "true",
+                "diffuse": "0.10 0.12 0.15",
+                "ambient": "0.025 0.028 0.032",
+                "specular": "0.01 0.01 0.01",
+                "castshadow": "false",
+            },
         ),
     )
 
@@ -719,8 +933,8 @@ def load_sim_model(
         },
     )
 
-    # A collision-free mocap body renders the full target pose instead of only
-    # a position sphere. Local +X/+Y/+Z are red/green/blue respectively.
+    # A collision-free mocap body renders a slender target frame. Local
+    # +X/+Y/+Z are red/green/blue respectively.
     target_frame = ET.Element(
         "body",
         {
@@ -735,15 +949,15 @@ def load_sim_model(
         {
             "name": "command_target",
             "type": "sphere",
-            "size": "0.012",
-            "rgba": "1 1 1 0.9",
+            "size": "0.006",
+            "rgba": "1 1 1 0.95",
             "group": "0",
         },
     )
     for name, endpoint, color in (
-        ("command_target_x", "0.16 0 0", "1 0.12 0.05 1"),
-        ("command_target_y", "0 0.16 0", "0.1 0.9 0.2 1"),
-        ("command_target_z", "0 0 0.16", "0.1 0.35 1 1"),
+        ("command_target_x", "0.11 0 0", "0.95 0.20 0.16 0.95"),
+        ("command_target_y", "0 0.11 0", "0.10 0.72 0.34 0.95"),
+        ("command_target_z", "0 0 0.11", "0.12 0.38 0.92 0.95"),
     ):
         ET.SubElement(
             target_frame,
@@ -752,7 +966,7 @@ def load_sim_model(
                 "name": name,
                 "type": "capsule",
                 "fromto": f"0 0 0 {endpoint}",
-                "size": "0.007",
+                "size": "0.0035",
                 "rgba": color,
                 "group": "0",
             },
@@ -764,58 +978,94 @@ def load_sim_model(
                 "name": f"{name}_tip",
                 "type": "sphere",
                 "pos": endpoint,
-                "size": "0.014",
+                "size": "0.0065",
                 "rgba": color,
                 "group": "0",
             },
         )
-    worldbody.insert(2, target_frame)
+    worldbody.insert(3, target_frame)
 
-    # Render the measured link6 pose with the same RGB coordinate frame as the
-    # command target.
-    eef_frame = worldbody.find(".//body[@name='link6']")
-    if eef_frame is None:
-        raise ValueError("J6 child body link6 is missing from MJCF")
-    ET.SubElement(
-        eef_frame,
-        "site",
-        {
-            "name": "current_eef",
-            "type": "sphere",
-            "size": "0.012",
-            "rgba": "1 1 1 0.9",
-            "group": "0",
-        },
-    )
-    for name, endpoint, color in (
-        ("current_eef_x", "0.16 0 0", "1 0.12 0.05 1"),
-        ("current_eef_y", "0 0.16 0", "0.1 0.9 0.2 1"),
-        ("current_eef_z", "0 0 0.16", "0.1 0.35 1 1"),
-    ):
-        ET.SubElement(
-            eef_frame,
-            "site",
+    # Optional collision-free mocap payload used by the paper-figure harness.
+    # Its gravity load is applied separately at the measured gripper point, so
+    # this body is visual-only and cannot destabilize contact at pickup time.
+    if add_pickup_object:
+        pickup_object = ET.Element(
+            "body",
             {
-                "name": name,
-                "type": "capsule",
-                "fromto": f"0 0 0 {endpoint}",
-                "size": "0.007",
-                "rgba": color,
-                "group": "0",
+                "name": "sim2sim_pickup_object",
+                "mocap": "true",
+                "pos": "0.39 0 0.09",
             },
         )
         ET.SubElement(
+            pickup_object,
+            "geom",
+            {
+                "name": "sim2sim_pickup_object_geom",
+                "type": "box",
+                "size": "0.045 0.040 0.090",
+                "rgba": "0.94 0.48 0.08 1",
+                "contype": "0",
+                "conaffinity": "0",
+                "group": "0",
+            },
+        )
+        worldbody.insert(4, pickup_object)
+
+    # assembly.xml also contains a legacy red `eef` site. It is only a visual
+    # marker: the policy reads the link6 body pose, so hiding it cannot change
+    # the observation or controller state.
+    if hide_current_ee_frame:
+        legacy_eef_site = root.find(".//site[@name='eef']")
+        if legacy_eef_site is not None:
+            legacy_eef_site.set("rgba", "1 0.2 0.1 0")
+
+    # The measured frame is shorter and translucent. It can be omitted from
+    # the generated MJCF explicitly without changing link6 or policy inputs.
+    if not hide_current_ee_frame:
+        eef_frame = worldbody.find(".//body[@name='link6']")
+        if eef_frame is None:
+            raise ValueError("J6 child body link6 is missing from MJCF")
+        ET.SubElement(
             eef_frame,
             "site",
             {
-                "name": f"{name}_tip",
+                "name": "current_eef",
                 "type": "sphere",
-                "pos": endpoint,
-                "size": "0.014",
-                "rgba": color,
+                "size": "0.005",
+                "rgba": "0.88 0.92 0.98 0.65",
                 "group": "0",
             },
         )
+        for name, endpoint, color in (
+            ("current_eef_x", "0.08 0 0", "0.95 0.20 0.16 0.58"),
+            ("current_eef_y", "0 0.08 0", "0.10 0.72 0.34 0.58"),
+            ("current_eef_z", "0 0 0.08", "0.12 0.38 0.92 0.58"),
+        ):
+            ET.SubElement(
+                eef_frame,
+                "site",
+                {
+                    "name": name,
+                    "type": "capsule",
+                    "fromto": f"0 0 0 {endpoint}",
+                    "size": "0.0025",
+                    "rgba": color,
+                    "group": "0",
+                },
+            )
+            ET.SubElement(
+                eef_frame,
+                "site",
+                {
+                    "name": f"{name}_tip",
+                    "type": "sphere",
+                    "pos": endpoint,
+                    "size": "0.0045",
+                    "rgba": color,
+                    "group": "0",
+                },
+            )
 
     # assembly.urdf models the UMI gripper as fixed geometry attached to
     # link6. Do not inject the obsolete six-DoF DAS gripper at runtime.
@@ -891,7 +1141,7 @@ class ThreeOnnxPolicy:
         )[0]
         if np.asarray(actor_probe).shape != (1, ACTION_DIM):
             raise ValueError(
-                f"actor.onnx does not satisfy the required [1,65]+[1,67]->[1,14] contract: "
+                f"actor.onnx does not satisfy the required [1,67]+[1,67]->[1,14] contract: "
                 f"got {np.asarray(actor_probe).shape}"
             )
 
@@ -1069,8 +1319,11 @@ class Sim2Sim:
         base_height: float,
         arm_max_step: float,
         max_leg_step: float,
+        lock_j6: bool,
+        lock_j6_angle: float,
         policy_decimation: int,
         se3_decrease_vel: float,
+        action_scale: np.ndarray,
     ):
         self.model = model
         self.data = mujoco.MjData(model)
@@ -1084,10 +1337,29 @@ class Sim2Sim:
             raise ValueError("--max-leg-step must be finite and non-negative")
         self.arm_max_step = float(arm_max_step)
         self.max_leg_step = float(max_leg_step)
+        if not math.isfinite(lock_j6_angle):
+            raise ValueError("--lock-j6-angle must be finite")
+        self.lock_j6 = bool(lock_j6)
+        self.lock_j6_angle = float(lock_j6_angle)
+        j6_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "J6")
+        if j6_joint_id < 0:
+            raise ValueError("J6 joint is missing from the MJCF")
+        if self.lock_j6 and model.jnt_limited[j6_joint_id]:
+            j6_min, j6_max = model.jnt_range[j6_joint_id]
+            if not j6_min <= self.lock_j6_angle <= j6_max:
+                raise ValueError(
+                    f"--lock-j6-angle={self.lock_j6_angle:g} is outside "
+                    f"J6 range [{j6_min:g}, {j6_max:g}]"
+                )
         self.policy_decimation = int(policy_decimation)
         if not math.isfinite(se3_decrease_vel) or se3_decrease_vel < 0.0:
             raise ValueError("--se3-decrease-vel must be finite and non-negative")
         self.se3_decrease_vel = float(se3_decrease_vel)
+        self.action_scale = np.asarray(action_scale, dtype=np.float64).copy()
+        if self.action_scale.shape != (ACTION_DIM,):
+            raise ValueError(f"action_scale must have shape ({ACTION_DIM},)")
+        if not np.isfinite(self.action_scale).all() or np.any(self.action_scale <= 0.0):
+            raise ValueError("all action scale values must be finite and positive")
 
         self.joint_qpos_adr = np.array([model.joint(name).qposadr[0] for name in JOINT_NAMES], dtype=int)
         self.joint_dof_adr = np.array([model.joint(name).dofadr[0] for name in JOINT_NAMES], dtype=int)
@@ -1203,12 +1475,11 @@ class Sim2Sim:
     def contact_observation(self) -> np.ndarray:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_torque,
                 self.pose_6d(ee_position, ee_rotation),
@@ -1222,13 +1493,12 @@ class Sim2Sim:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
         target_position, target_rotation = self.target_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
                 self.pose_6d(target_position, target_rotation),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_action,
                 self.pose_6d(ee_position, ee_rotation),
@@ -1308,7 +1578,7 @@ class Sim2Sim:
             # saturate only the resulting PD torque below.  Pre-clipping the
             # position target changes both the closed-loop dynamics and the
             # last_action observation seen by the policy.
-            scaled_action = self.raw_action * ACTION_SCALE
+            scaled_action = self.raw_action * self.action_scale
             self.raw_desired_position = DEFAULT_JOINT_POS + scaled_action
             self.policy_desired_position = self.raw_desired_position.copy()
 
@@ -1325,6 +1595,8 @@ class Sim2Sim:
                     self._previous_policy_command[LEG_IDS] - self.max_leg_step,
                     self._previous_policy_command[LEG_IDS] + self.max_leg_step,
                 )
+            if self.lock_j6:
+                command[J6_ID] = self.lock_j6_angle
             self.desired_position = command
             self.effective_action = command - DEFAULT_JOINT_POS
             self.policy_command_step = command - self._previous_policy_command
@@ -1332,6 +1604,12 @@ class Sim2Sim:
             # mdp.last_action in IsaacLab exposes the raw action-manager input,
             # not a torque-aware or rate-limited target.
             self.last_action = self.raw_action.copy()
+            if self.lock_j6:
+                # Match the deployment controller: the policy observes the
+                # effective fixed-position action for a locked J6.
+                self.last_action[J6_ID] = (
+                    self.lock_j6_angle - DEFAULT_JOINT_POS[J6_ID]
+                ) / self.action_scale[J6_ID]
 
         torque = KP * (self.desired_position - position) - KD * velocity
         torque = np.clip(torque, -TORQUE_LIMIT, TORQUE_LIMIT)
@@ -1367,7 +1645,14 @@ class Sim2Sim:
         )
 
 
-def configure_viewer(viewer_handle, base_body_id: int, track_robot: bool) -> None:
+def configure_viewer(
+    viewer_handle,
+    base_body_id: int,
+    track_robot: bool,
+    camera_azimuth: float,
+    camera_elevation: float,
+    camera_distance: float,
+) -> None:
     if track_robot:
         viewer_handle.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
         viewer_handle.cam.trackbodyid = base_body_id
@@ -1376,9 +1661,9 @@ def configure_viewer(viewer_handle, base_body_id: int, track_robot: bool) -> Non
         viewer_handle.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
         viewer_handle.cam.trackbodyid = -1
     viewer_handle.cam.lookat[:] = [0.0, 0.0, 0.45]
-    viewer_handle.cam.distance = 2.4
-    viewer_handle.cam.azimuth = 135.0
-    viewer_handle.cam.elevation = -18.0
+    viewer_handle.cam.distance = camera_distance
+    viewer_handle.cam.azimuth = camera_azimuth
+    viewer_handle.cam.elevation = camera_elevation
     viewer_handle.opt.geomgroup[2] = 1
     viewer_handle.opt.geomgroup[3] = 0
 
@@ -1386,6 +1671,10 @@ def configure_viewer(viewer_handle, base_body_id: int, track_robot: bool) -> Non
 def run(args: argparse.Namespace) -> None:
     if not math.isfinite(args.physics_dt) or args.physics_dt <= 0.0:
         raise ValueError("--physics-dt must be finite and positive")
+    if args.freeze_after is not None and (
+        not math.isfinite(args.freeze_after) or args.freeze_after < 0.0
+    ):
+        raise ValueError("--freeze-after must be finite and non-negative")
     decimation_float = POLICY_DT / args.physics_dt
     policy_decimation = round(decimation_float)
     if policy_decimation < 1 or not math.isclose(
@@ -1403,24 +1692,68 @@ def run(args: argparse.Namespace) -> None:
             planar_center=not args.no_planar_center,
             playback_speed=args.trajectory_speed,
         )
-        # This is the fallback hold target before trajectory anchoring starts.
-        command = np.asarray(
-            args.command if args.command is not None else [0.15, 0.0, 1.0, 0.0, 0.0, 0.0],
-            dtype=np.float64,
-        )
-        command_frame = "world"
+        if args.command is not None:
+            command = np.asarray(args.command, dtype=np.float64)
+            command_frame = args.command_frame
+        elif trajectory.position_mode in ("absolute_world", "absolute_base"):
+            command = np.concatenate(
+                (trajectory.positions[0], rpy_from_rotation(trajectory.rotations[0]))
+            )
+            command_frame = (
+                "base" if trajectory.position_mode == "absolute_base" else "world"
+            )
+        else:
+            # Fallback hold target before a relative trajectory anchors itself.
+            command = np.array([0.15, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+            command_frame = "world"
     else:
         command = read_command(args.command)
         command_frame = args.command_frame
+    if (args.pickup_object or args.payload_gravity) and trajectory is None:
+        raise ValueError("--pickup-object and --payload-gravity require --trajectory")
+    if not math.isfinite(args.record_smoothing) or args.record_smoothing < 0.0:
+        raise ValueError("--record-smoothing must be finite and non-negative")
+
+    record_output: Path | None = None
+    raw_trajectory_output: Path | None = None
+    smooth_trajectory_output: Path | None = None
+    if args.record_output is not None:
+        record_output = args.record_output.expanduser().resolve()
+        if record_output.suffix.lower() != ".npz":
+            raise ValueError("--record-output must end in .npz")
+        raw_trajectory_output = record_output.with_name(
+            f"{record_output.stem}_raw.pkl"
+        )
+        smooth_trajectory_output = record_output.with_name(
+            f"{record_output.stem}_smooth.pkl"
+        )
+        existing = [
+            path
+            for path in (record_output, raw_trajectory_output, smooth_trajectory_output)
+            if path.exists()
+        ]
+        if existing:
+            raise FileExistsError(
+                "Refusing to overwrite an existing keyboard recording: "
+                + ", ".join(str(path) for path in existing)
+            )
 
     model_dir = args.model_dir or newest_exported_model_dir()
     rng = np.random.default_rng(args.seed)
+    if args.action_scale is None:
+        action_scale = ACTION_SCALE.copy()
+        action_scale_description = "legs/ankles 0.6, J1-J3 0.3, J4-J6 0.2"
+    else:
+        if not math.isfinite(args.action_scale) or args.action_scale <= 0.0:
+            raise ValueError("--action-scale must be finite and positive")
+        action_scale = np.full(ACTION_DIM, args.action_scale, dtype=np.float64)
+        action_scale_description = f"all joints {args.action_scale:g}"
 
     print(f"[sim2sim] MJCF: {args.mjcf.expanduser().resolve()}")
     print(f"[sim2sim] ONNX: {model_dir.expanduser().resolve()}")
     print(
         "[sim2sim] 训练契约：EE frame=link6；"
-        "action scale=legs/ankles 0.6, J1-J3 0.3, J4-J6 0.2"
+        f"action scale={action_scale_description}"
     )
     print(
         "[sim2sim] 最终点 "
@@ -1431,6 +1764,14 @@ def run(args: argparse.Namespace) -> None:
         "[sim2sim] 50Hz目标限幅："
         f"arm_max_step={args.arm_max_step:g} rad，"
         f"max_leg_step={args.max_leg_step:g} rad（0=关闭）"
+    )
+    print(
+        "[sim2sim] J6："
+        + (
+            f"强制锁定在 {args.lock_j6_angle:g} rad"
+            if args.lock_j6
+            else "由策略控制"
+        )
     )
     clock_status = (
         "严格匹配训练"
@@ -1453,6 +1794,10 @@ def run(args: argparse.Namespace) -> None:
     print(
         f"[sim2sim] latent：{'逐步采样（匹配训练）' if args.sample_latent else '使用均值（确定性诊断）'}"
     )
+    if args.freeze_after is not None:
+        print(
+            f"[sim2sim] 冻结：运行到 {args.freeze_after:g}s 后停止物理并保持窗口"
+        )
     if command_frame == "base":
         print(
             "[sim2sim] WARNING: --command-frame base 会让目标跟随移动基座；"
@@ -1463,10 +1808,17 @@ def run(args: argparse.Namespace) -> None:
             f"[trajectory] file={trajectory.path}, episode={trajectory.episode_index}, "
             f"frames={len(trajectory.positions)}, sample_dt={trajectory.sample_dt:g}s, "
             f"speed={trajectory.playback_speed:g}x, "
-            f"duration={trajectory.duration:.3f}s, start_delay={trajectory.start_delay:g}s"
+            f"duration={trajectory.duration:.3f}s, start_delay={trajectory.start_delay:g}s, "
+            f"position_mode={trajectory.position_mode}"
         )
 
-    model = load_sim_model(args.mjcf, physics_dt=args.physics_dt, add_door=args.door)
+    model = load_sim_model(
+        args.mjcf,
+        physics_dt=args.physics_dt,
+        add_door=args.door,
+        hide_current_ee_frame=args.hide_current_ee_frame,
+        add_pickup_object=args.pickup_object,
+    )
     policy = ThreeOnnxPolicy(model_dir, args.sample_latent, rng)
     simulation = Sim2Sim(
         model,
@@ -1476,9 +1828,24 @@ def run(args: argparse.Namespace) -> None:
         args.base_height,
         args.arm_max_step,
         args.max_leg_step,
+        args.lock_j6,
+        args.lock_j6_angle,
         policy_decimation,
         args.se3_decrease_vel,
+        action_scale,
     )
+    pickup_mocap_id = -1
+    if args.pickup_object:
+        assert trajectory is not None
+        pickup_body_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_BODY, "sim2sim_pickup_object"
+        )
+        if pickup_body_id < 0:
+            raise ValueError("pickup object was requested but is missing from the model")
+        pickup_mocap_id = int(model.body_mocapid[pickup_body_id])
+        simulation.data.mocap_pos[pickup_mocap_id] = trajectory.object_position_world
+        simulation.data.mocap_quat[pickup_mocap_id] = [1.0, 0.0, 0.0, 0.0]
+        mujoco.mj_forward(model, simulation.data)
     if args.eef_x_offset is not None:
         if not math.isfinite(args.eef_x_offset):
             raise ValueError("--eef-x-offset must be finite")
@@ -1501,6 +1868,31 @@ def run(args: argparse.Namespace) -> None:
             f"delta_world={actual_offset.round(6).tolist()} m"
         )
     keyboard = TerminalKeyboardController(args.keyboard_step, args.keyboard_rotation_step)
+    record: dict[str, list] = {
+        "time": [],
+        "target_position_base": [],
+        "target_rotation_base": [],
+        "measured_position_base": [],
+        "measured_rotation_base": [],
+        "target_position_world": [],
+        "target_rotation_world": [],
+        "measured_position_world": [],
+        "measured_rotation_world": [],
+        "base_position_world": [],
+        "joint_position": [],
+        "joint_velocity": [],
+        "joint_torque": [],
+        "raw_action": [],
+        "effective_action": [],
+        "gripper_command": [],
+    }
+    if record_output is not None:
+        print(f"[record] keyboard raw data: {record_output}")
+        print(f"[record] raw trajectory: {raw_trajectory_output}")
+        print(
+            f"[record] smoothed trajectory: {smooth_trajectory_output} "
+            f"(Gaussian sigma={args.record_smoothing:g}s)"
+        )
 
     if args.duration is None:
         if trajectory is None:
@@ -1532,6 +1924,7 @@ def run(args: argparse.Namespace) -> None:
 
     def loop(viewer_handle=None) -> None:
         physics_step = 0
+        freeze_message_printed = False
         # Establish the wall-clock epoch only after the viewer has finished
         # opening. Otherwise its startup cost makes the simulation briefly
         # race ahead in an attempt to "catch up".
@@ -1540,6 +1933,7 @@ def run(args: argparse.Namespace) -> None:
         last_log_sim = simulation.data.time
         viewer_sync_count = 0
         while physics_step < max_steps and (viewer_handle is None or viewer_handle.is_running()):
+            policy_updated = physics_step % policy_decimation == 0
             (
                 target_delta,
                 target_rpy_delta,
@@ -1550,6 +1944,21 @@ def run(args: argparse.Namespace) -> None:
             if quit_requested:
                 print("\n[keyboard] 终端请求退出。")
                 break
+            if (
+                args.freeze_after is not None
+                and simulation.data.time >= args.freeze_after
+            ):
+                if not freeze_message_printed:
+                    print(
+                        f"[sim2sim] 已在 t={simulation.data.time:.3f}s 冻结；"
+                        "关闭窗口或按 Q 退出。"
+                    )
+                    freeze_message_printed = True
+                if viewer_handle is None:
+                    break
+                viewer_handle.sync()
+                time.sleep(1.0 / max(args.render_fps, 1.0))
+                continue
             if gripper_command is not None:
                 simulation.set_gripper_command(gripper_command)
                 print("[keyboard] 当前 URDF 将夹爪建模为固定几何，O/C 不改变模型。")
@@ -1572,9 +1981,74 @@ def run(args: argparse.Namespace) -> None:
                     target_changed = True
             if target_changed or print_target:
                 print_keyboard_target()
-            if trajectory is not None and physics_step % policy_decimation == 0:
+            if trajectory is not None and policy_updated:
                 trajectory.update(simulation)
+            simulation.data.qfrc_applied[:] = 0.0
+            payload_mass = 0.0
+            if trajectory is not None:
+                payload_mass = float(trajectory.payload_mass[trajectory.current_frame])
+                ee_position_world = simulation.data.xpos[simulation.ee_body_id].copy()
+                ee_rotation_world = simulation.data.xmat[simulation.ee_body_id].reshape(3, 3).copy()
+                pickup_point_world = (
+                    ee_position_world + ee_rotation_world @ trajectory.pickup_tip_offset
+                )
+                if args.payload_gravity and payload_mass > 0.0:
+                    mujoco.mj_applyFT(
+                        model,
+                        simulation.data,
+                        np.array([0.0, 0.0, -payload_mass * 9.81], dtype=np.float64),
+                        np.zeros(3, dtype=np.float64),
+                        pickup_point_world,
+                        simulation.ee_body_id,
+                        simulation.data.qfrc_applied,
+                    )
+                if pickup_mocap_id >= 0:
+                    object_grasped = (
+                        trajectory.current_frame * trajectory.sample_dt
+                        >= trajectory.grasp_time
+                    )
+                    if object_grasped:
+                        simulation.data.mocap_pos[pickup_mocap_id] = pickup_point_world
+                        pickup_quaternion = np.empty(4, dtype=np.float64)
+                        mujoco.mju_mat2Quat(
+                            pickup_quaternion, ee_rotation_world.reshape(-1)
+                        )
+                        simulation.data.mocap_quat[pickup_mocap_id] = pickup_quaternion
+                    else:
+                        simulation.data.mocap_pos[pickup_mocap_id] = (
+                            trajectory.object_position_world
+                        )
+                        simulation.data.mocap_quat[pickup_mocap_id] = [1.0, 0.0, 0.0, 0.0]
             simulation.step(physics_step)
+            if policy_updated and record_output is not None:
+                target_position_base, target_rotation_base = simulation.target_pose_base()
+                measured_position_base, measured_rotation_base = simulation.ee_pose_base()
+                target_position_world, target_rotation_world = simulation.target_pose_world()
+                measured_position_world = simulation.data.xpos[
+                    simulation.ee_body_id
+                ].copy()
+                measured_rotation_world = simulation.data.xmat[
+                    simulation.ee_body_id
+                ].reshape(3, 3).copy()
+                joint_position, joint_velocity = simulation.joint_state()
+                record["time"].append(float(simulation.data.time))
+                record["target_position_base"].append(target_position_base.copy())
+                record["target_rotation_base"].append(target_rotation_base.copy())
+                record["measured_position_base"].append(measured_position_base.copy())
+                record["measured_rotation_base"].append(measured_rotation_base.copy())
+                record["target_position_world"].append(target_position_world.copy())
+                record["target_rotation_world"].append(target_rotation_world.copy())
+                record["measured_position_world"].append(measured_position_world)
+                record["measured_rotation_world"].append(measured_rotation_world)
+                record["base_position_world"].append(
+                    simulation.data.xpos[simulation.base_body_id].copy()
+                )
+                record["joint_position"].append(joint_position)
+                record["joint_velocity"].append(joint_velocity)
+                record["joint_torque"].append(simulation.last_torque.copy())
+                record["raw_action"].append(simulation.raw_action.copy())
+                record["effective_action"].append(simulation.effective_action.copy())
+                record["gripper_command"].append(float(simulation.gripper_command))
             physics_step += 1
             # Physics runs at 1 kHz, but synchronizing the GUI at 1 kHz makes
             # wall-clock time lag badly and looks like slow motion.
@@ -1629,6 +2103,95 @@ def run(args: argparse.Namespace) -> None:
                 last_log_sim = simulation.data.time
                 viewer_sync_count = 0
 
+    def save_keyboard_recording() -> None:
+        if (
+            record_output is None
+            or raw_trajectory_output is None
+            or smooth_trajectory_output is None
+        ):
+            return
+        if not record["time"]:
+            print("[record] no policy samples were captured; no files written")
+            return
+
+        record_output.parent.mkdir(parents=True, exist_ok=True)
+        arrays = {key: np.asarray(values) for key, values in record.items()}
+        relative_time = arrays["time"] - arrays["time"][0]
+        raw_position = arrays["target_position_base"]
+        raw_rotation = arrays["target_rotation_base"]
+        raw_rpy = np.unwrap(
+            np.stack([rpy_from_rotation(rotation) for rotation in raw_rotation]),
+            axis=0,
+        )
+        smooth_position = gaussian_smooth(
+            raw_position, args.record_smoothing, POLICY_DT
+        )
+        smooth_rpy = gaussian_smooth(raw_rpy, args.record_smoothing, POLICY_DT)
+        smooth_rotation = np.stack(
+            [rotation_from_rpy(*rpy) for rpy in smooth_rpy]
+        )
+
+        arrays.update(
+            {
+                "time_from_start": relative_time,
+                "target_rpy_base_raw": raw_rpy,
+                "target_position_base_smooth": smooth_position,
+                "target_rpy_base_smooth": smooth_rpy,
+                "target_rotation_base_smooth": smooth_rotation,
+                "model_dir": np.array(str(model_dir.expanduser().resolve())),
+                "sample_rate_hz": np.array(1.0 / POLICY_DT),
+                "command_frame": np.array("base"),
+                "smoothing_sigma_s": np.array(args.record_smoothing),
+            }
+        )
+        np.savez_compressed(record_output, **arrays)
+
+        def episode(
+            position: np.ndarray,
+            rotation: np.ndarray,
+            trajectory_name: str,
+            description: str,
+        ) -> dict:
+            return {
+                "t": relative_time,
+                "ee_pos": position,
+                "ee_axis_angle": np.stack(
+                    [axis_angle_from_rotation(value) for value in rotation]
+                ),
+                "gripper_width": arrays["gripper_command"],
+                "metadata": {
+                    "position_mode": "absolute_base",
+                    "trajectory_name": trajectory_name,
+                    "description": description,
+                    "source_recording_npz": str(record_output),
+                    "sample_rate_hz": 1.0 / POLICY_DT,
+                    "smoothing_sigma_s": args.record_smoothing,
+                },
+            }
+
+        raw_episode = episode(
+            raw_position,
+            raw_rotation,
+            raw_trajectory_output.stem,
+            "Raw target pose recorded from keyboard teleoperation",
+        )
+        smooth_episode = episode(
+            smooth_position,
+            smooth_rotation,
+            smooth_trajectory_output.stem,
+            "Gaussian-smoothed target pose from keyboard teleoperation",
+        )
+        with raw_trajectory_output.open("wb") as file:
+            pickle.dump([raw_episode], file, protocol=pickle.HIGHEST_PROTOCOL)
+        with smooth_trajectory_output.open("wb") as file:
+            pickle.dump([smooth_episode], file, protocol=pickle.HIGHEST_PROTOCOL)
+        print(
+            f"[record] saved {len(relative_time)} samples "
+            f"({relative_time[-1]:.2f} s) to {record_output}"
+        )
+        print(f"[record] raw replay trajectory: {raw_trajectory_output}")
+        print(f"[record] smooth replay trajectory: {smooth_trajectory_output}")
+
     print(
         "[keyboard] MuJoCo 窗口或终端均可控制："
         "W/S = ±X，A/D = ±Y，R/F = ±Z；"
@@ -1642,13 +2205,15 @@ def run(args: argparse.Namespace) -> None:
     try:
         try:
             if args.headless:
-                if run_duration <= 0:
-                    raise ValueError("--headless requires --duration greater than zero")
+                if run_duration <= 0 and args.freeze_after is None:
+                    raise ValueError(
+                        "--headless requires --duration greater than zero or --freeze-after"
+                    )
                 loop()
             else:
-                import mujoco.viewer
+                from mujoco import viewer as mujoco_viewer
 
-                with mujoco.viewer.launch_passive(
+                with mujoco_viewer.launch_passive(
                     model,
                     simulation.data,
                     key_callback=keyboard.viewer_key_callback,
@@ -1657,12 +2222,16 @@ def run(args: argparse.Namespace) -> None:
                         viewer_handle,
                         simulation.base_body_id,
                         track_robot=not args.free_camera,
+                        camera_azimuth=args.camera_azimuth,
+                        camera_elevation=args.camera_elevation,
+                        camera_distance=args.camera_distance,
                     )
                     loop(viewer_handle)
         except KeyboardInterrupt:
             print("\n[sim2sim] 用户停止。")
     finally:
         keyboard.close()
+        save_keyboard_recording()
 
     pos_error, rot_error = simulation.error()
     ee_position, _ = simulation.ee_pose_base()

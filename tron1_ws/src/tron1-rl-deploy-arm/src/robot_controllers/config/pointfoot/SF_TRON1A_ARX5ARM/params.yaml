@@ -127,6 +127,10 @@ PointfootCfg:
     # If false, use mu directly for deterministic inference.
     sample_next_obs_latent: false
 
+  # Position-only policy: preserve 14-D ONNX IO but do not send J6 output to the robot.
+  arm_lock_j6: true
+  arm_lock_j6_angle: 0.0
+
   normalization:
     encoder_normalize: True
     clip_scales:
@@ -146,7 +150,7 @@ PointfootCfg:
 
   size:
     actions_size: 14 
-    observations_size: 65 # matches actor input
+    observations_size: 67 # matches actor input
     commands_size: 5
     obs_history_length: 10
     encoder_output_size: 67

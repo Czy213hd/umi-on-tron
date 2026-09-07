@@ -3,8 +3,8 @@
 
 The inference chain matches the IsaacLab/RSL-RL export:
 
-    10 x 55 contact observations -> contactNet -> GRU -> 67-D latent
-    65-D policy observation + 67-D latent -> actor -> 14 joint targets
+    10 x 57 contact observations -> contactNet -> GRU -> 67-D latent
+    67-D policy observation + 67-D latent -> actor -> 14 joint targets
 
 If ``--command`` is omitted, the program asks for a final end-effector pose
 as ``x y z roll pitch yaw`` before opening the viewer.
@@ -28,8 +28,8 @@ import onnxruntime as ort
 
 
 SCRIPT_PATH = Path(__file__).resolve()
-ISAACLAB_ROOT = SCRIPT_PATH.parents[2]
-REPO_ROOT = ISAACLAB_ROOT.parent
+REPO_ROOT = SCRIPT_PATH.parent
+ISAACLAB_ROOT = REPO_ROOT / "IsaacLab_RFM"
 
 DEFAULT_MJCF = (
     ISAACLAB_ROOT
@@ -41,8 +41,9 @@ DEPLOYED_MODEL_DIR = (
     "pointfoot/SF_TRON1A_ARX5ARM/policy"
 )
 DEFAULT_TRAJECTORY = Path("/home/phi5090ii/UMI-ON-TRON/data/pushing.pkl")
-TIP_OFFSET_POS = np.array([0.08657, -0.0249, -0.00024366], dtype=np.float64)
-TIP_OFFSET_RPY = (-math.pi * 0.5, 0.0, -math.pi * 0.5)
+# Training observes and commands link6 directly.
+TIP_OFFSET_POS = np.zeros(3, dtype=np.float64)
+TIP_OFFSET_RPY = (0.0, 0.0, 0.0)
 
 # Isaac Lab articulation/action order measured from the training environment.
 JOINT_NAMES = (
@@ -61,10 +62,17 @@ JOINT_NAMES = (
     "J5",
     "J6",
 )
+# JointPositionAction scales from the saved training env.yaml.
+ACTION_SCALE = np.array(
+    [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.3, 0.6, 0.6, 0.3, 0.3, 0.2, 0.2, 0.2],
+    dtype=np.float64,
+)
 DEFAULT_JOINT_POS = np.array(
     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
     dtype=np.float64,
 )
+ISAAC_RESET_JOINT_POS = DEFAULT_JOINT_POS.copy()
+ISAAC_RESET_JOINT_POS[JOINT_NAMES.index("J3")] = 0.065
 
 # IsaacLab actuator gains used by LIMX_SF_TRON1A_ARM.
 KP = np.array(
@@ -87,13 +95,13 @@ PHYSICS_DT = 0.001
 POLICY_DECIMATION = 20
 POLICY_DT = PHYSICS_DT * POLICY_DECIMATION
 HISTORY_LENGTH = 10
-OBS_DIM = 65
-CONTACT_OBS_DIM = 55
+OBS_DIM = 67
+CONTACT_OBS_DIM = 57
 ACTION_DIM = 14
 # MuJoCo friction is (sliding, torsional, rolling), not static/dynamic/rolling.
-# Keep deterministic sim2sim at the IsaacLab terrain's nominal coefficient;
-# IsaacLab's training-side material randomization remains untouched.
-MUJOCO_CONTACT_FRICTION = "1.0 0.005 0.0001"
+# Training randomizes static friction in [0.7, 1.3] and dynamic friction in
+# [0.6, 1.2]. Their shared midpoint, 0.9, is the deterministic parity value.
+MUJOCO_CONTACT_FRICTION = "0.9 0.005 0.0001"
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,12 +135,21 @@ def parse_args() -> argparse.Namespace:
         help="Simulation duration in seconds; 0 runs until the viewer closes. "
         "Default: 30 s manually, or one complete trajectory.",
     )
-    parser.add_argument("--base-height", type=float, default=0.84)
-    parser.add_argument(
+    parser.add_argument("--base-height", type=float, default=0.8)
+    latent_group = parser.add_mutually_exclusive_group()
+    latent_group.add_argument(
         "--sample-latent",
+        dest="sample_latent",
         action="store_true",
-        help="Sample the predicted latent distribution instead of using its mean.",
+        help="Sample the predicted latent distribution (default; matches training).",
     )
+    latent_group.add_argument(
+        "--mean-latent",
+        dest="sample_latent",
+        action="store_false",
+        help="Use the latent mean for deterministic diagnostics.",
+    )
+    parser.set_defaults(sample_latent=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-realtime", action="store_true")
@@ -578,14 +595,18 @@ class Sim2Sim:
         mujoco.mj_resetData(model, self.data)
         root_adr = model.joint("root").qposadr[0]
         self.data.qpos[root_adr : root_adr + 7] = [0.0, 0.0, base_height, 1.0, 0.0, 0.0, 0.0]
-        self.data.qpos[self.joint_qpos_adr] = DEFAULT_JOINT_POS
+        self.data.qpos[self.joint_qpos_adr] = ISAAC_RESET_JOINT_POS
         self.data.qvel[:] = 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(model, self.data)
 
         self.raw_action = np.zeros(ACTION_DIM, dtype=np.float64)
         self.last_action = np.zeros(ACTION_DIM, dtype=np.float64)
-        self.last_torque = np.zeros(ACTION_DIM, dtype=np.float64)
+        self.last_torque = np.clip(
+            -KP * ISAAC_RESET_JOINT_POS,
+            -TORQUE_LIMIT,
+            TORQUE_LIMIT,
+        )
         self.history: deque[np.ndarray] = deque(maxlen=HISTORY_LENGTH)
         self.se3_distance_reference = self._initial_se3_distance()
         first_contact_obs = self.contact_observation()
@@ -646,12 +667,11 @@ class Sim2Sim:
     def contact_observation(self) -> np.ndarray:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_torque,
                 self.pose_6d(ee_position, ee_rotation),
@@ -665,13 +685,12 @@ class Sim2Sim:
         position, velocity = self.joint_state()
         ee_position, ee_rotation = self.ee_pose_base()
         target_position, target_rotation = self.target_pose_base()
-        no_ankle = np.array(["ankle" not in name for name in JOINT_NAMES])
         observation = np.concatenate(
             (
                 self.base_angular_velocity(),
                 self.projected_gravity(),
                 self.pose_6d(target_position, target_rotation),
-                (position - DEFAULT_JOINT_POS)[no_ankle],
+                position - DEFAULT_JOINT_POS,
                 velocity,
                 self.last_action,
                 self.pose_6d(ee_position, ee_rotation),
@@ -680,7 +699,7 @@ class Sim2Sim:
         )
         if observation.shape != (OBS_DIM,):
             raise RuntimeError(f"Policy observation has shape {observation.shape}")
-        return np.clip(observation, -100.0, 100.0)
+        return observation
 
     def _initial_se3_distance(self) -> float:
         ee_position, ee_rotation = self.ee_pose_base()
@@ -722,17 +741,15 @@ class Sim2Sim:
 
     def apply_pd(self) -> None:
         position, velocity = self.joint_state()
-        # Same torque-aware action clamp used by SolefootController.cpp.
-        action_min = position - DEFAULT_JOINT_POS + (KD * velocity - TORQUE_LIMIT) / KP
-        action_max = position - DEFAULT_JOINT_POS + (KD * velocity + TORQUE_LIMIT) / KP
-        effective_action = np.clip(self.raw_action, action_min, action_max)
-        desired_position = DEFAULT_JOINT_POS + effective_action
+        # Match IsaacLab JointPositionAction: scale the raw policy output,
+        # retain that raw output for mdp.last_action, and saturate only torque.
+        desired_position = DEFAULT_JOINT_POS + self.raw_action * ACTION_SCALE
         torque = KP * (desired_position - position) - KD * velocity
         torque = np.clip(torque, -TORQUE_LIMIT, TORQUE_LIMIT)
 
         self.data.ctrl[:] = 0.0
         self.data.ctrl[self.motor_ids] = torque
-        self.last_action = effective_action
+        self.last_action = self.raw_action.copy()
         self.last_torque = torque
 
     def step(self, physics_step: int) -> None:

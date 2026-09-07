@@ -805,20 +805,11 @@ void SolefootController::computeObservation() {
     jointTor(i) = hybridJointHandles_[i].getEffort();
   }
 
-  // ---- Build joint_pos_rel excluding ankles (policy/contactNet expects 12 dims) ----
-  std::vector<scalar_t> jointPosRelNoAnkle;
-  jointPosRelNoAnkle.reserve(numJoints);
+  // ---- Build joint_pos_rel for all 14 actuated joints ----
+  vector_t jointPosRel(numJoints);
   for (size_t i = 0; i < numJoints; ++i) {
-    const std::string name = (i < jointNames_.size()) ? jointNames_[i] : std::string();
-    if (!name.empty() && name.find("ankle") != std::string::npos) {
-      continue;
-    }
     const scalar_t initAngle = (i < static_cast<size_t>(initJointAngles_.size())) ? initJointAngles_(static_cast<int>(i)) : 0.0;
-    jointPosRelNoAnkle.push_back(jointPos(i) - initAngle);
-  }
-  vector_t jointPosRelNoAnkleVec(static_cast<int>(jointPosRelNoAnkle.size()));
-  for (size_t i = 0; i < jointPosRelNoAnkle.size(); ++i) {
-    jointPosRelNoAnkleVec(static_cast<int>(i)) = jointPosRelNoAnkle[i];
+    jointPosRel(static_cast<int>(i)) = jointPos(i) - initAngle;
   }
 
   // ---- EE forward kinematics (base_Link -> link6) ----
@@ -1020,7 +1011,7 @@ void SolefootController::computeObservation() {
   }
 
 
-  // ---- Policy obs (actor input): 65 dims ----
+  // ---- Policy obs (actor input): 67 dims ----
   std::vector<scalar_t> policyObs;
   policyObs.reserve(observationSize_);
   // base_lin_vel: in sim, prefer gazebo ground truth if available; otherwise use GRU-estimated velocity.
@@ -1057,9 +1048,9 @@ void SolefootController::computeObservation() {
   policyObs.push_back(eeTargetRotB(2, 1));
   // [OLD] ee tracking error in EE frame (replaced by EE_commands_b above):
   // policyObs.insert(policyObs.end(), eeTrackingError.begin(), eeTrackingError.end());
-  // joint_pos_rel (exclude ankles)
-  for (int i = 0; i < jointPosRelNoAnkleVec.size(); ++i) {
-    policyObs.push_back(jointPosRelNoAnkleVec(i));
+  // joint_pos_rel (all joints)
+  for (int i = 0; i < jointPosRel.size(); ++i) {
+    policyObs.push_back(jointPosRel(i));
   }
   // joint_vel (all joints)
   for (size_t i = 0; i < numJoints; ++i) {
@@ -1086,7 +1077,7 @@ void SolefootController::computeObservation() {
   }
   obs_debug_pub_.publish(obs_debug_msg_);
 
-  // ---- contactNet obs (history): 55 dims ----
+  // ---- contactNet obs (history): 57 dims ----
   std::vector<scalar_t> cnObs;
   cnObs.reserve(contactNetObsSize_);
   // base_ang_vel
@@ -1097,9 +1088,9 @@ void SolefootController::computeObservation() {
   cnObs.push_back(projectedGravity.x());
   cnObs.push_back(projectedGravity.y());
   cnObs.push_back(projectedGravity.z());
-  // joint_pos_rel (exclude ankles)
-  for (int i = 0; i < jointPosRelNoAnkleVec.size(); ++i) {
-    cnObs.push_back(jointPosRelNoAnkleVec(i));
+  // joint_pos_rel (all joints)
+  for (int i = 0; i < jointPosRel.size(); ++i) {
+    cnObs.push_back(jointPosRel(i));
   }
   // joint_vel (all joints)
   for (size_t i = 0; i < numJoints; ++i) {

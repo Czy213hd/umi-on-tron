@@ -121,6 +121,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    # Keep the interactive viewport clean for publication-quality screenshots.
+    # These calls only hide editor guides; they do not touch USD state, physics,
+    # observations, actions, rewards, or the policy.
+    if not args_cli.headless:
+        from omni.kit.viewport.actions.actions import toggle_axis_visibility, toggle_grid_visibility
+
+        toggle_grid_visibility(visible=False)
+        toggle_axis_visibility(visible=False)
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {

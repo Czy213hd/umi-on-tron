@@ -527,15 +527,14 @@ def reach_EE_orient(
 def track_EE_pb(
     env: ManagerBasedRLEnv,
     command_name: str = "EE_pose",
-    use_walking_gate: bool = True,
-    use_safety_gate: bool = True,
+    orientation_weight: float = 1.0,
 ) -> torch.Tensor:
     """基于优化进展（progress-based）的 EE 跟踪奖励。
 
     参数:
         env: 环境对象。
         command_name: 命令项名称。
-        use_walking_gate: 是否在接近目标时衰减 PB 奖励。默认开启以保持原有行为。
+        orientation_weight: 姿态进展权重；位置专用任务设为 0。
 
     返回:
         shape=(num_envs,) 的进展奖励。
@@ -560,7 +559,11 @@ def track_EE_pb(
     near_target_progress_scale = 0.25 + 0.75 * _walking_gate(
         env, command_name=command_name
     )
-    return progress_reward * near_target_progress_scale
+    return (
+        (2 * pos_improve * position_scale + orientation_weight * orient_improve * orient_scale)
+        * env._loco_safety_scale
+        * near_target_progress_scale
+    )
 
 
 def body_ee_alignment(env: ManagerBasedRLEnv, joint_names: Sequence[str] = ("J1", "J4")) -> torch.Tensor:

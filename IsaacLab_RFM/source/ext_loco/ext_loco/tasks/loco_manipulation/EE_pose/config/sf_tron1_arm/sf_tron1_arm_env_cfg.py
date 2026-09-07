@@ -215,10 +215,9 @@ class ObservationsCfg:
         # ) # 9 dim (3 pos + 6 rot)
 
         joint_pos = ObsTerm(
-            func=mdp.joint_pos_rel_exclude_wheel,
+            func=mdp.joint_pos_rel,
             noise=Unoise(n_min=-0.01, n_max=0.01),
-            params={"asset_cfg": SceneEntityCfg("robot", joint_names="(?!ankle_).+")},
-        )  # 12 dim
+        )  # 14 dim
         
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5)) # 14 dim
         actions = ObsTerm(func=mdp.last_action) # 14 dim
@@ -245,10 +244,9 @@ class ObservationsCfg:
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))  # 3
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))  # 3
         joint_pos = ObsTerm(
-            func=mdp.joint_pos_rel_exclude_wheel,
+            func=mdp.joint_pos_rel,
             noise=Unoise(n_min=-0.01, n_max=0.01),
-            params={"asset_cfg": SceneEntityCfg("robot", joint_names="(?!ankle_).+")},
-        )  # 12
+        )  # 14
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.8, n_max=0.8))  # 14
         
         joint_torque = ObsTerm(func=mdp.joint_torque, noise=Unoise(n_min=-0.8, n_max=0.8))  # 14
@@ -269,20 +267,19 @@ class ObservationsCfg:
         """Observations for contactNet group."""
 
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel)  # 3
-        projected_gravity = ObsTerm(func=mdp.projected_gravity)  # 6
+        projected_gravity = ObsTerm(func=mdp.projected_gravity)  # 3
         joint_pos = ObsTerm(
-            func=mdp.joint_pos_rel_exclude_wheel,
-            params={"asset_cfg": SceneEntityCfg("robot", joint_names="(?!ankle_).+")},
-        )  # 33
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel)  # 55
+            func=mdp.joint_pos_rel,
+        )  # 14
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel)  # 14
         EE_pose = ObsTerm(
             func=mdp.EE_current_pose_b,
             params={"asset_cfg": SceneEntityCfg("robot", body_names="link6")},
-        )  # 86
+        )  # 9
         foot_position_b = ObsTerm(
             func=mdp.foot_position_b,
             params={"asset_cfg": SceneEntityCfg("robot", body_names="ankle_[RL]_Link")},
-        )  # 197
+        )  # 6
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -627,7 +624,7 @@ class RewardsCfg:
     )
     foot_slip_l2 = RewTerm(
         func=mdp.foot_slip_l2,
-        weight=-2.0,                      
+        weight=-2.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="ankle_.*"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="ankle_.*"),
