@@ -37,6 +37,8 @@ class PPO_IOS(PPO):
         schedule="fixed",
         desired_kl=0.01,
         next_obs_latent_dim=32,
+        use_latent=True,
+        use_privileged_actor=False,
         beta=0.1,
         flow_matching=False,
         parameterization="velocity",
@@ -53,6 +55,10 @@ class PPO_IOS(PPO):
         self.initial_learning_rate = learning_rate
         self.tf_gru_lr = learning_rate
         self.next_obs_latent_dim = next_obs_latent_dim
+        self.use_latent = use_latent
+        self.use_privileged_actor = use_privileged_actor
+        if self.use_latent and self.use_privileged_actor:
+            raise ValueError("use_privileged_actor=true requires use_latent=false")
         # PPO components
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
@@ -192,22 +198,27 @@ class PPO_IOS(PPO):
         # self.storage.transition["base_lin_vel_gt"] = critic_obs[:, obs.shape[1] : obs.shape[1] + 3]
         self.storage.transition["cn_obs_history"] = cn_obs_hist
         self.storage.transition["gru_latent"] = self.gru.hidden_state.clone()
-        cn_output = self.tf_encoder(cn_obs_hist)
-        next_gru_latent = self.gru.gru_forward(cn_output, self.storage.transition["gru_latent"]).clone()
+        if self.use_privileged_actor:
+            actor_input = critic_obs
+        elif self.use_latent:
+            cn_output = self.tf_encoder(cn_obs_hist)
+            next_gru_latent = self.gru.gru_forward(cn_output, self.storage.transition["gru_latent"]).clone()
         ## sample the next_obs_latent
-        mu = next_gru_latent[:, 3 : 3 + self.next_obs_latent_dim]
-        logvar = next_gru_latent[:, 3 + self.next_obs_latent_dim :]
-        distribution = torch.distributions.Normal(mu, (logvar.exp() + 1e-4).sqrt())
-        next_obs_latent = distribution.sample()
-        next_gru_latent = torch.cat(
-            [
-                next_gru_latent[:, :3],
-                next_obs_latent,
-                next_gru_latent[:, 3 + 2 * self.next_obs_latent_dim :],
-            ],
-            dim=-1,
-        )
-        actor_input = torch.cat([obs, next_gru_latent.detach()], dim=-1)
+            mu = next_gru_latent[:, 3 : 3 + self.next_obs_latent_dim]
+            logvar = next_gru_latent[:, 3 + self.next_obs_latent_dim :]
+            distribution = torch.distributions.Normal(mu, (logvar.exp() + 1e-4).sqrt())
+            next_obs_latent = distribution.sample()
+            next_gru_latent = torch.cat(
+                [
+                    next_gru_latent[:, :3],
+                    next_obs_latent,
+                    next_gru_latent[:, 3 + 2 * self.next_obs_latent_dim :],
+                ],
+                dim=-1,
+            )
+            actor_input = torch.cat([obs, next_gru_latent.detach()], dim=-1)
+        else:
+            actor_input = obs
         self.storage.transition["actor_inputs"] = actor_input
         actions = self.actor_critic.act(actor_input)
         # actions = self.corrupt_action(actions, num=1024)
@@ -283,8 +294,12 @@ class PPO_IOS(PPO):
             "cn_obs_hist": cn_obs_hist,
             "next_obs_gt": next_obs_gt,
         }
-        _, aux_losses = self._prepare_actor_input(prepared_obs, old_gru_latent)
-        losses.update(aux_losses)
+        if self.use_latent:
+            _, aux_losses = self._prepare_actor_input(prepared_obs, old_gru_latent)
+            losses.update(aux_losses)
+        else:
+            zero = obs.new_zeros(())
+            losses.update({"lin_vel": zero, "next_obs": zero, "beta_vae": zero})
 
         value_batch = self.actor_critic.evaluate(critic_obs)
         for param_group in self.tf_gru_optimizer.param_groups:
@@ -423,14 +438,14 @@ class PPO_IOS(PPO):
             # allowed to mutate model weights.
             self.tf_gru_optimizer.zero_grad()
             self.ppo_optimizer.zero_grad()
-            mse_loss.backward()
+            if self.use_latent:
+                mse_loss.backward()
             ppo_loss.backward()
 
-            grad_norms = {
-                "gru": nn.utils.clip_grad_norm_(self.gru.parameters(), self.max_grad_norm),
-                "tf_encoder": nn.utils.clip_grad_norm_(self.tf_encoder.parameters(), self.max_grad_norm),
-                "actor_critic": nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm),
-            }
+            grad_norms = {"actor_critic": nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)}
+            if self.use_latent:
+                grad_norms["gru"] = nn.utils.clip_grad_norm_(self.gru.parameters(), self.max_grad_norm)
+                grad_norms["tf_encoder"] = nn.utils.clip_grad_norm_(self.tf_encoder.parameters(), self.max_grad_norm)
             invalid_gradients = [
                 name for name, norm in grad_norms.items() if not torch.isfinite(norm)
             ]
@@ -442,7 +457,8 @@ class PPO_IOS(PPO):
                     "Optimizer step was skipped to preserve finite model weights."
                 )
 
-            self.tf_gru_optimizer.step()
+            if self.use_latent:
+                self.tf_gru_optimizer.step()
             self.ppo_optimizer.step()
             for key in loss_item:
                 accumulated_losses[key] += loss_item[key].detach().item()

@@ -15,7 +15,7 @@ from rsl_rl.algorithms import PPO_IOS
 from rsl_rl.env import VecEnv
 
 # from legged_loco.utils.wrapper import TwoCriticWrapperEnv
-from rsl_rl.modules import ActorCritic, EmpiricalNormalization, SimplifiedContactNetModel, ActorCritic, GRUWrapper, FlowActorCritic
+from rsl_rl.modules import ActorCritic, EmpiricalNormalization, SimplifiedContactNetModel, ActorCritic, GRUWrapper, FlowActorCritic, CENet, IdentityGRUWrapper, LastObservationEncoder
 from rsl_rl.utils import store_code_state
 from copy import deepcopy
 import numpy as np
@@ -72,8 +72,15 @@ class ImplicitOneStageRunner:
         ):
             if key in self.ppo_alg_cfg:
                 actor_policy_cfg[key] = self.ppo_alg_cfg[key]
+        use_latent = self.ppo_alg_cfg.get("use_latent", True)
+        use_privileged_actor = self.ppo_alg_cfg.get("use_privileged_actor", False)
+        if use_latent and use_privileged_actor:
+            raise ValueError("use_privileged_actor=true requires use_latent=false")
+        actor_input_dim = self.num_critic_obs if use_privileged_actor else num_obs
+        if use_latent:
+            actor_input_dim += self.gru_cfg["gru_latent_dim"] - self.ppo_alg_cfg["next_obs_latent_dim"]
         actor_critic: ActorCritic = actor_critic_class(
-            num_obs + self.gru_cfg["gru_latent_dim"] - self.ppo_alg_cfg["next_obs_latent_dim"],
+            actor_input_dim,
             self.num_critic_obs,
             self.env.num_actions,
             num_envs=self.env.num_envs,
@@ -81,7 +88,9 @@ class ImplicitOneStageRunner:
             **actor_policy_cfg,
         ).to(self.device)
 
-        gru = GRUWrapper(num_envs=self.env.num_envs, device=self.device, **self.gru_cfg)
+        gru_cfg = dict(self.gru_cfg)
+        gru_class = eval(gru_cfg.pop("class_name", "GRUWrapper"))
+        gru = gru_class(num_envs=self.env.num_envs, device=self.device, **gru_cfg)
 
         self.actor_critic = actor_critic
         self.gru = gru
@@ -196,7 +205,7 @@ class ImplicitOneStageRunner:
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     update_lr = i % 3 == 0
-                    if update_lr:
+                    if update_lr and self.ppo_alg.use_latent:
                         lr_udpate_count += 1
                         self.ppo_alg.tf_gru_lr = self.get_learning_rate(
                             lr_udpate_count, self.contactNet_cfg["model_dim"]
@@ -472,6 +481,8 @@ class ImplicitOneStageRunner:
         return loaded_dict["infos"]
 
     def get_inference_policy(self, device=None):  # TODO: not complete
+        if not self.ppo_alg.use_latent:
+            return self.get_inference_vanilla_policy(device=device)
         self.eval_mode()  # switch to evaluation mode (dropout for example)
         if device is not None:
             self.ppo_alg.tf_encoder.to(device)
@@ -600,7 +611,7 @@ class VanillaPolicyWrapper:
         self.obs_normalizer.eval()
         self.__name__ = "policy"
 
-    def __call__(self, obs):
+    def __call__(self, obs, cn_obs_hist=None):
         assert obs.dim() == 2, f"Expected obs to be 2D tensor, got {obs.dim()}"
         num_envs, num_obs = obs.shape
         assert num_obs == self.num_obs, f"Expected obs to have {self.num_obs} features, got {num_obs}"

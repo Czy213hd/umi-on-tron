@@ -22,6 +22,7 @@ from dataclasses import MISSING
 
 @configclass
 class GruCfg:
+    class_name: str = "GRUWrapper"
     gru_latent_dim: int = MISSING
     gru_input_dim: int = MISSING
     gru_batch_first: bool = True
@@ -38,11 +39,15 @@ class ContactNetCfg:
     next_obs_decoder_hidden_dims: list = MISSING
     next_obs_decoder_input_dim: int = MISSING
     dropout: float = MISSING
+    history_length: int = 10
+    hidden_dims: list = MISSING
     class_name: str = "ContactNetModel"
 
 
 @configclass
 class PpoIOSCfg(RslRlPpoAlgorithmCfg):
+    use_latent: bool = True
+    use_privileged_actor: bool = False
     next_obs_latent_dim: int = MISSING
     beta: float = MISSING
     flow_matching: bool = False
@@ -114,6 +119,8 @@ class ImplicitOneStageRunnerCfg(RslRlOnPolicyRunnerCfg):
         dim_feedforward=512,
         next_obs_decoder_hidden_dims=[256, 128],
         dropout=0.0,
+        history_length=cn_obs_hist_len,
+        hidden_dims=[128, 64],
         class_name="SimplifiedContactNetModel",
     )
     contactNet.output_dim = 3 + 2 * ppo_algorithm.next_obs_latent_dim

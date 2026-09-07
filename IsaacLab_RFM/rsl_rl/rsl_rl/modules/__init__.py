@@ -10,5 +10,7 @@ from .normalizer import EmpiricalNormalization
 from .simpliedContactNet import SimplifiedContactNetModel
 from .MLP_enc_dec import MLPEncoderDecoder
 from .GRUWrapper import GRUWrapper
+from .cenet import CENet, IdentityGRUWrapper
+from .temporal_ablation import LastObservationEncoder
 
-__all__ = ["ActorCritic", "FlowActorCritic", "EmpiricalNormalization", "SimplifiedContactNetModel", "GRUWrapper", "MLPEncoderDecoder"]
+__all__ = ["ActorCritic", "FlowActorCritic", "EmpiricalNormalization", "SimplifiedContactNetModel", "GRUWrapper", "CENet", "IdentityGRUWrapper", "LastObservationEncoder", "MLPEncoderDecoder"]
